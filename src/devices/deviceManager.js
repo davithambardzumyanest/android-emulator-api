@@ -42,6 +42,10 @@ class DeviceManager {
     if (!d) throw new Error('Device not found');
     return d;
   }
+
+  clear() {
+    this.devices.clear();
+  }
 }
 
 module.exports = new DeviceManager();

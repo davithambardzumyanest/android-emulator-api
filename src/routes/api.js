@@ -7,13 +7,53 @@ router.get('/', (_req, res) => {
   res.json({ name: 'Unified Mobile Emulator API', status: 'ok' });
 });
 
-// Device Management
-router.post('/devices/register', (req, res) => {
+// Cleanup: stop all emulators and kill lingering processes
+router.post('/cleanup', async (_req, res) => {
   try {
-    const device = deviceService.register(req.body || {});
-    res.json({ deviceId: device.id, device });
+    const summary = await deviceService.cleanupAll();
+    res.json({ success: true, ...summary });
   } catch (e) {
-    res.status(e.status || 500).json({ error: e.message || 'register failed' });
+    res.status(e.status || 500).json({ success: false, error: e.message || 'cleanup failed' });
+  }
+});
+
+// Device Management
+router.post('/devices/register', async (req, res) => {
+  try {
+    const device = await deviceService.register(req.body || {});
+    
+    // Prepare detailed response
+    const response = {
+      success: true,
+      deviceId: device.id,
+      platform: device.platform,
+      status: device.status,
+      meta: device.meta,
+      registeredAt: device.createdAt,
+      emulator: device.platform === 'android' ? {
+        name: device.meta.emulator?.name,
+        port: device.meta.emulator?.port,
+        pid: device.meta.emulator?.pid,
+        command: device.meta.emulator?.command
+      } : undefined
+    };
+
+    // Log the command that was used to start the emulator
+    if (device.platform === 'android' && device.meta.emulator?.command) {
+      console.log('\nEmulator started with command:');
+      console.log(device.meta.emulator.command);
+      console.log('\nTo connect to this emulator manually, use:');
+      console.log(`adb connect 127.0.0.1:${device.meta.emulator.port}`);
+    }
+
+    res.json(response);
+  } catch (e) {
+    console.error('Device registration failed:', e);
+    res.status(e.status || 500).json({
+      success: false,
+      error: e.message || 'Device registration failed',
+      details: process.env.NODE_ENV === 'development' ? e.stack : undefined
+    });
   }
 });
 
@@ -101,6 +141,22 @@ router.post('/devices/:id/rotate', async (req, res) => {
     res.json(result);
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message || 'rotate failed' });
+  }
+});
+
+// Execute arbitrary adb subcommands on the mapped emulator
+// Example body: { "command": "shell pm grant com.google.android.apps.maps android.permission.ACCESS_FINE_LOCATION" }
+router.post('/devices/:id/adb', async (req, res) => {
+  try {
+    const { command } = req.body || {};
+    if (!command || (typeof command === 'string' && command.trim().length === 0)) {
+      return res.status(400).json({ success: false, error: "'command' is required" });
+    }
+
+    const result = await deviceService.executeAdb(req.params.id, command);
+    res.json({ success: true, stdout: result.stdout, stderr: result.stderr });
+  } catch (e) {
+    res.status(e.status || 500).json({ success: false, error: e.message || 'adb failed' });
   }
 });
 
