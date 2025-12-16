@@ -188,6 +188,12 @@ const deviceService = {
             '-netfast'
         ];
 
+        // Headless mode via env
+        const headless = String(process.env.EMULATOR_HEADLESS || '').toLowerCase() === 'true';
+        if (headless) {
+            args.push('-no-window');
+        }
+
         // If cleanup requested a fresh device, wipe data on next boot
         if (consumeWipeOnceFlag()) {
             args.push('-wipe-data');
