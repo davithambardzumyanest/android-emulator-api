@@ -2,6 +2,27 @@ const deviceManager = require('../devices/deviceManager');
 const { spawn } = require('child_process');
 const { v4: uuidv4 } = require('uuid');
 const logger = require('../logger');
+const fs = require('fs');
+const path = require('path');
+
+// One-time wipe flag to ensure next emulator start uses a clean data partition
+const wipeFlagPath = path.join(__dirname, '../../.state');
+const wipeFlagFile = path.join(wipeFlagPath, 'wipe-once.flag');
+function setWipeOnceFlag() {
+  try {
+    fs.mkdirSync(wipeFlagPath, { recursive: true });
+    fs.writeFileSync(wipeFlagFile, String(Date.now()));
+  } catch (_) { /* ignore */ }
+}
+function consumeWipeOnceFlag() {
+  try {
+    if (fs.existsSync(wipeFlagFile)) {
+      fs.unlinkSync(wipeFlagFile);
+      return true;
+    }
+  } catch (_) { /* ignore */ }
+  return false;
+}
 
 const deviceService = {
   async register(payload) {
@@ -80,6 +101,11 @@ const deviceService = {
       '-cores', '2',
       '-netfast'
     ];
+
+    // If cleanup requested a fresh device, wipe data on next boot
+    if (consumeWipeOnceFlag()) {
+      args.push('-wipe-data');
+    }
 
     if (proxy) {
       args.push('-http-proxy', proxy);
@@ -245,7 +271,7 @@ const deviceService = {
    * 3) Kill adb server to release ports
    */
   async cleanupAll() {
-    const summary = { stopResults: [], processKills: [], adbKill: null };
+    const summary = { stopResults: [], adbEnumeratedKills: [], processKills: [], adbKill: null, wipeNextStart: false };
     try {
       const stopped = await this.stopAllEmulators();
       summary.stopResults = stopped.results || [];
@@ -268,10 +294,37 @@ const deviceService = {
       });
     }
 
-    // Kill common Android emulator processes that might remain
+    // Enumerate any running emulators via adb and request graceful kill
+    const devicesList = await (async () => {
+      const res = await trySpawn('adb', ['devices']);
+      const out = (res.stderr ? '' : '') + '';
+      // We need stdout; re-run capturing stdout
+      return new Promise((resolve) => {
+        const proc = spawn('adb', ['devices'], { stdio: ['ignore', 'pipe', 'pipe'] });
+        let stdout = '';
+        proc.stdout.on('data', (d) => { stdout += d.toString(); });
+        proc.on('close', () => resolve(stdout));
+        proc.on('error', () => resolve(''));
+      });
+    })();
+
+    const emulatorSerials = String(devicesList)
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => /^emulator-\d+\s+device$/.test(l))
+      .map((l) => l.split(/\s+/)[0]);
+
+    for (const serial of emulatorSerials) {
+      // eslint-disable-next-line no-await-in-loop
+      const res = await trySpawn('adb', ['-s', serial, 'emu', 'kill']);
+      summary.adbEnumeratedKills.push({ serial, ...res });
+    }
+
+    // Kill common QEMU processes that might remain (avoid broad -f on 'emulator' to not match our API path)
     const killPatterns = [
-      ['pkill', ['-f', 'emulator']],
       ['pkill', ['-f', 'qemu-system-']],
+      ['pkill', ['-x', 'emulator']],
+      ['pkill', ['-x', 'emulator-headless']],
     ];
     for (const [cmd, args] of killPatterns) {
       // eslint-disable-next-line no-await-in-loop
@@ -281,6 +334,10 @@ const deviceService = {
 
     // Kill adb server to release any lingering connections/ports
     summary.adbKill = await trySpawn('adb', ['kill-server']);
+
+    // Ensure next emulator start is a fresh device (one-time wipe)
+    setWipeOnceFlag();
+    summary.wipeNextStart = true;
 
     return summary;
   },
