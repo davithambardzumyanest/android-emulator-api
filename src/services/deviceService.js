@@ -13,6 +13,24 @@ function setWipeOnceFlag() {
     fs.mkdirSync(wipeFlagPath, { recursive: true });
     fs.writeFileSync(wipeFlagFile, String(Date.now()));
   } catch (_) { /* ignore */ }
+
+// Normalize proxy string for emulator flag (-http-proxy) which is more reliable with host:port
+function normalizeProxyForEmulator(p) {
+  if (!p) return null;
+  try {
+    const u = new URL(p);
+    // If credentials or explicit scheme provided, pass through as-is (emulator supports full URL with auth)
+    if (u.username || u.password || /:^https?:$/.test(u.protocol)) {
+      return p;
+    }
+    const host = u.hostname;
+    const port = u.port ? Number(u.port) : (u.protocol === 'https:' ? 443 : 80);
+    return `${host}:${port}`;
+  } catch (_) {
+    // allow host:port format directly
+    return String(p);
+  }
+}
 }
 function consumeWipeOnceFlag() {
   try {
@@ -60,7 +78,18 @@ const deviceService = {
       meta.deviceId = `emulator-${port}`;
     }
 
-    return deviceManager.register({ platform, proxy, meta });
+    const device = deviceManager.register({ platform, proxy, meta });
+
+    // Best-effort: apply Android proxy if provided
+    if (platform === 'android' && proxy) {
+      try {
+        await this.applyProxy(device.id, proxy);
+      } catch (e) {
+        logger.warn(`applyProxy on register failed: ${e.message}`);
+      }
+    }
+
+    return device;
   },
 
   executeCommand(command, args = []) {
@@ -88,6 +117,44 @@ const deviceService = {
       });
     });
   },
+  /**
+   * Apply or clear Android global HTTP proxy on device.
+   * Accepts URL (http/https) or host:port.
+   */
+  async applyProxy(id, proxyUrl) {
+    // If falsy, clear proxy settings
+    if (!proxyUrl || String(proxyUrl).trim() === '') {
+      try { await this.executeAdb(id, ['shell', 'settings', 'put', 'global', 'http_proxy', ':0']); } catch (_) {}
+      try { await this.executeAdb(id, ['shell', 'settings', 'delete', 'global', 'global_http_proxy_host']); } catch (_) {}
+      try { await this.executeAdb(id, ['shell', 'settings', 'delete', 'global', 'global_http_proxy_port']); } catch (_) {}
+      try { await this.executeAdb(id, ['shell', 'settings', 'put', 'global', 'global_http_proxy_exclusion_list', '']); } catch (_) {}
+      return { cleared: true };
+    }
+
+    function parse(u) {
+      try {
+        const parsed = new URL(u);
+        const host = parsed.hostname;
+        const port = parsed.port ? Number(parsed.port) : (parsed.protocol === 'https:' ? 443 : 80);
+        return { host, port };
+      } catch (_) {
+        const m = String(u).match(/^([^:]+):(\d+)$/);
+        if (m) return { host: m[1], port: Number(m[2]) };
+        const e = new Error('Invalid proxy URL');
+        e.status = 400;
+        throw e;
+      }
+    }
+
+    const { host, port } = parse(proxyUrl);
+    const hostPort = `${host}:${port}`;
+    await this.executeAdb(id, ['shell', 'settings', 'put', 'global', 'http_proxy', hostPort]);
+    await this.executeAdb(id, ['shell', 'settings', 'put', 'global', 'global_http_proxy_host', host]);
+    await this.executeAdb(id, ['shell', 'settings', 'put', 'global', 'global_http_proxy_port', String(port)]);
+    // Ensure no exclusion list blocks traffic
+    try { await this.executeAdb(id, ['shell', 'settings', 'put', 'global', 'global_http_proxy_exclusion_list', '']); } catch (_) {}
+    return { applied: true, host, port };
+  },
 
   async startEmulator(avdName, port, proxy) {
     const args = [
@@ -108,7 +175,11 @@ const deviceService = {
     }
 
     if (proxy) {
-      args.push('-http-proxy', proxy);
+      const norm = normalizeProxyForEmulator(proxy);
+      args.push('-http-proxy', norm);
+      // Set public DNS to avoid corporate DNS blocking when using proxy
+      args.push('-dns-server', process.env.EMULATOR_DNS || '8.8.8.8,1.1.1.1');
+      logger.info(`[Emulator ${avdName}] using proxy ${norm} with DNS ${process.env.EMULATOR_DNS || '8.8.8.8,1.1.1.1'}`);
     }
 
     const emulatorProcess = spawn('emulator', args, {
@@ -154,6 +225,11 @@ const deviceService = {
       e.status = 404;
       throw e;
     }
+    // Apply proxy on device (async, best-effort)
+    (async () => {
+      try { await this.applyProxy(id, proxy); }
+      catch (e) { logger.warn(`applyProxy on update failed: ${e.message}`); }
+    })();
     return updated;
   },
 
