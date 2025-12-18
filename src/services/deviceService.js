@@ -210,7 +210,11 @@ const deviceService = {
         // Launch emulator directly with logs to console for debugging
         const emulatorProcess = spawn('emulator', args, {
             stdio: 'inherit', // pipe to parent's stdio to see logs in console
-            shell: false
+            shell: false,
+            env: {
+                ANDROID_HOME: '/root/Android/Sdk',
+                ANDROID_SDK_ROOT: '/root/Android/Sdk',
+            }
         });
 
         // Log process exit
