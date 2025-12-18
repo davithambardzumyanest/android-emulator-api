@@ -207,25 +207,20 @@ const deviceService = {
             logger.info(`[Emulator ${avdName}] using proxy ${norm} with DNS ${process.env.EMULATOR_DNS || '8.8.8.8,1.1.1.1'}`);
         }
 
-        // Launch via nohup so the emulator survives SIGHUP and keeps running after parent exits
-        // Redirect stdout/stderr to a log file, similar to '> /tmp/emulator.log 2>&1 &'
-        const logPath = process.env.EMULATOR_LOG_FILE || '/tmp/emulator.log';
-        let outFd;
-        try {
-            outFd = fs.openSync(logPath, 'a');
-        } catch (e) {
-            // Fallback to ignoring output if log file can't be opened
-            outFd = 'ignore';
-            logger.warn(`Failed to open log file ${logPath}: ${e.message}`);
-        }
-
-        const emulatorProcess = spawn('nohup', ['emulator', ...args], {
-            detached: true,   // runs child in its own process group
-            stdio: ['ignore', outFd, outFd]
+        // Launch emulator directly with logs to console for debugging
+        const emulatorProcess = spawn('emulator', args, {
+            stdio: 'inherit', // pipe to parent's stdio to see logs in console
+            shell: false
         });
 
-        // Fully detach so it continues running even if API exits
-        emulatorProcess.unref();
+        // Log process exit
+        emulatorProcess.on('close', (code) => {
+            logger.info(`Emulator process exited with code ${code}`);
+        });
+
+        emulatorProcess.on('error', (err) => {
+            logger.error(`Failed to start emulator: ${err.message}`);
+        });
 
         return emulatorProcess;
     },
