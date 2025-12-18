@@ -207,13 +207,15 @@ const deviceService = {
             logger.info(`[Emulator ${avdName}] using proxy ${norm} with DNS ${process.env.EMULATOR_DNS || '8.8.8.8,1.1.1.1'}`);
         }
 
-        const emulatorProcess = spawn('emulator', args, {
-            detached: true,
-            stdio: 'ignore'
+        // Launch via nohup so the emulator survives SIGHUP and keeps running after parent exits
+        // This will create a nohup.out file in the current working directory if stdout/stderr are not redirected
+        const emulatorProcess = spawn('nohup', ['emulator', ...args], {
+            detached: true,   // runs child in its own process group
+            stdio: 'ignore'   // ignores stdin/stdout/stderr (nohup will fallback to nohup.out)
         });
 
         // Fully detach so it continues running even if API exits
-        try { emulatorProcess.unref(); } catch (_) {}
+        emulatorProcess.unref();
 
         return emulatorProcess;
     },
@@ -470,6 +472,19 @@ const deviceService = {
             summary.deepClean = dc;
         } catch (e) {
             summary.deepClean.errors = [String(e?.message || e)];
+        }
+
+        // Optionally restart this API via PM2 if service name is provided
+        const pm2Service = process.env.PM2_APP_NAME;
+        if (pm2Service && pm2Service.trim().length > 0) {
+            try {
+                summary.pm2Restart = await (async () => {
+                    // reuse trySpawn in this scope
+                    return await trySpawn('pm2', ['restart', pm2Service]);
+                })();
+            } catch (e) {
+                summary.pm2Restart = { command: `pm2 restart ${pm2Service}`, code: -1, stderr: String(e?.message || e) };
+            }
         }
 
         return summary;
