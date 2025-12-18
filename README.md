@@ -134,6 +134,8 @@ Below is a concise list of primary endpoints. All bodies are JSON unless noted.
 - `PORT`: server port (default `3000`).
 - `LOG_LEVEL`: pino log level (`info`, `debug`, etc.).
 - `GOOGLE_MAPS_API_KEY`: required for Directions-based GPS routes and Maps intents in `navigationService`.
+- `EMULATOR_HEADLESS`: when `true`, starts the Android emulator with `-no-window` (headless mode). Default: `false`.
+- `EMULATOR_DNS`: optional comma-separated DNS servers passed to emulator via `-dns-server`. Example: `8.8.8.8,1.1.1.1`.
 
 
 ## Security & Hardening

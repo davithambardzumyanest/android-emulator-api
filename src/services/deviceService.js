@@ -209,17 +209,11 @@ const deviceService = {
 
         const emulatorProcess = spawn('emulator', args, {
             detached: true,
-            stdio: ['ignore', 'pipe', 'pipe']
+            stdio: 'ignore'
         });
 
-        // Log emulator output
-        emulatorProcess.stdout.on('data', (data) => {
-            logger.info(`[Emulator ${avdName}] ${data}`.trim());
-        });
-
-        emulatorProcess.stderr.on('data', (data) => {
-            logger.error(`[Emulator ${avdName} ERROR] ${data}`.trim());
-        });
+        // Fully detach so it continues running even if API exits
+        try { emulatorProcess.unref(); } catch (_) {}
 
         return emulatorProcess;
     },
@@ -396,7 +390,8 @@ const deviceService = {
             adbEnumeratedKills: [],
             processKills: [],
             adbKill: null,
-            wipeNextStart: false
+            wipeNextStart: false,
+            deepClean: { avdPaths: [], tmpPaths: [], errors: [] }
         };
         try {
             const stopped = await this.stopAllEmulators();
@@ -469,7 +464,84 @@ const deviceService = {
         setWipeOnceFlag();
         summary.wipeNextStart = true;
 
+        // Deep clean: remove caches/locks/logs/snapshots and temp emulator files
+        try {
+            const dc = this.deepCleanEmulatorCaches();
+            summary.deepClean = dc;
+        } catch (e) {
+            summary.deepClean.errors = [String(e?.message || e)];
+        }
+
         return summary;
+    },
+
+    /**
+     * Remove emulator caches/locks/logs/snapshots under ~/.android/avd and temp files in /tmp.
+     * Does not delete AVD definitions (.ini or system images). Best-effort and safe.
+     */
+    deepCleanEmulatorCaches() {
+        const res = { avdPaths: [], tmpPaths: [], errors: [] };
+        try {
+            const home = process.env.HOME || process.env.USERPROFILE || '';
+            if (home) {
+                const avdRoot = path.join(home, '.android', 'avd');
+                if (fs.existsSync(avdRoot)) {
+                    const entries = fs.readdirSync(avdRoot, { withFileTypes: true });
+                    for (const ent of entries) {
+                        if (!ent.isDirectory() || !ent.name.endsWith('.avd')) continue;
+                        const avdDir = path.join(avdRoot, ent.name);
+                        const targets = [
+                            'cache.img',
+                            'cache.img.qcow2',
+                            'multiinstance.lock',
+                            'hardware-qemu.ini.lock',
+                            'config.ini.lock',
+                        ];
+                        const targetDirs = ['snapshots', 'logs', 'tmp'];
+                        for (const f of targets) {
+                            const p = path.join(avdDir, f);
+                            try { if (fs.existsSync(p)) { fs.rmSync(p, { force: true }); res.avdPaths.push(p); } } catch (e) { res.errors.push(`${p}: ${e.message}`); }
+                        }
+                        for (const d of targetDirs) {
+                            const p = path.join(avdDir, d);
+                            try { if (fs.existsSync(p)) { fs.rmSync(p, { recursive: true, force: true }); res.avdPaths.push(p); } } catch (e) { res.errors.push(`${p}: ${e.message}`); }
+                        }
+                        // Remove generic *.lock files
+                        try {
+                            const avdFiles = fs.readdirSync(avdDir);
+                            for (const name of avdFiles) {
+                                if (name.endsWith('.lock')) {
+                                    const p = path.join(avdDir, name);
+                                    try { fs.rmSync(p, { force: true }); res.avdPaths.push(p); } catch (e) { res.errors.push(`${p}: ${e.message}`); }
+                                }
+                            }
+                        } catch (e) { res.errors.push(`${avdDir}: ${e.message}`); }
+                    }
+                }
+            }
+        } catch (e) {
+            res.errors.push(`avdRoot: ${e.message}`);
+        }
+
+        // Clean /tmp emulator leftovers
+        try {
+            const tmp = '/tmp';
+            const patterns = [/^android-emu/i, /^android-.*/i, /^AndroidEmulator/i, /^emu-.*$/i];
+            if (fs.existsSync(tmp)) {
+                const entries = fs.readdirSync(tmp, { withFileTypes: true });
+                for (const ent of entries) {
+                    const name = ent.name;
+                    if (patterns.some((re) => re.test(name))) {
+                        const p = path.join(tmp, name);
+                        try { fs.rmSync(p, { recursive: true, force: true }); res.tmpPaths.push(p); } catch (e) { res.errors.push(`${p}: ${e.message}`); }
+                    }
+                }
+            }
+        } catch (e) {
+            res.errors.push(`tmp: ${e.message}`);
+        }
+
+        return res;
     },
 };
 
