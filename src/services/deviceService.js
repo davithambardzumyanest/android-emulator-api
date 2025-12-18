@@ -59,7 +59,7 @@ const deviceService = {
         // If it's an Android device and no deviceId is provided, create an emulator
         if (platform === 'android' && !meta.deviceId) {
             const emulatorName = `emulator-${uuidv4().substring(0, 8)}`;
-            const port = 5554 + Math.floor(Math.random() * 100); // Random port between 5554-5654
+            const port = 5555 + (Math.floor(Math.random() * 16) * 2); // Random odd port between 5555-5585
 
             // Create AVD (Android Virtual Device)
             // await this.executeCommand('avdmanager', [
