@@ -1,6 +1,20 @@
 const deviceManager = require('../devices/deviceManager');
 const android = require('../platforms/android');
 const ios = require('../platforms/ios');
+const { handleSystemDialogs } = require('../utils/dialogHandler');
+
+async function withDialogHandling(deviceId, action) {
+  const device = deviceManager.ensure(deviceId);
+  // Check for and handle any system dialogs
+  if (device.platform === 'android' && device?.meta?.deviceId) {
+      console.log('android dialog handling')
+      await handleSystemDialogs(device?.meta?.deviceId);
+  } else {
+      console.log('device.platform')
+      console.log(device.platform)
+  }
+  return action(device);
+}
 
 function controllerFor(device) {
   if (device.platform === 'android') return android;
@@ -10,9 +24,9 @@ function controllerFor(device) {
 
 const ActionEngine = {
   async launchApp(deviceId, appId) {
-    const device = deviceManager.ensure(deviceId);
-    const ctrl = controllerFor(device);
-    return ctrl.launchApp(device, appId);
+    return withDialogHandling(deviceId, 
+        device => controllerFor(device).launchApp(device, appId)
+    );
   },
   async closeApp(deviceId, appId) {
     const device = deviceManager.ensure(deviceId);
@@ -23,6 +37,11 @@ const ActionEngine = {
     const device = deviceManager.ensure(deviceId);
     const ctrl = controllerFor(device);
     return ctrl.tap(device, payload);
+  },
+  async tap(deviceId, payload) {
+    return withDialogHandling(deviceId,
+        device => controllerFor(device).tap(device, payload)
+    );
   },
   async swipe(deviceId, payload) {
     const device = deviceManager.ensure(deviceId);
@@ -89,9 +108,13 @@ const ActionEngine = {
     return { ok: true, taskId };
   },
   async screenshotStream(deviceId) {
-    const device = deviceManager.ensure(deviceId);
-    const ctrl = controllerFor(device);
-    return ctrl.screenshotStream(device);
+    return withDialogHandling(deviceId,
+        () => {
+            const device = deviceManager.ensure(deviceId);
+            const ctrl = controllerFor(device);
+            return ctrl.screenshotStream(device);
+        }
+    );
   },
 };
 

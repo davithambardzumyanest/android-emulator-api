@@ -4,6 +4,7 @@ const {v4: uuidv4} = require('uuid');
 const logger = require('../logger');
 const fs = require('fs');
 const path = require('path');
+const { handleSystemDialogs } = require('../utils/dialogHandler');
 
 // One-time wipe flag to ensure next emulator start uses a clean data partition
 const wipeFlagPath = path.join(__dirname, '../../.state');
@@ -302,7 +303,7 @@ const deviceService = {
             e.status = 400;
             throw e;
         }
-
+        await handleSystemDialogs(serial)
         const args = ['-s', serial, ...parts];
         logger.debug(`Executing: adb ${args.join(' ')}`);
 
