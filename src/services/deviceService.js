@@ -477,8 +477,8 @@ const deviceService = {
             summary.processKills.push(res);
         }
 
-        // Kill adb server to release any lingering connections/ports
-        summary.adbKill = await trySpawn('adb', ['kill-server']);
+        // // Kill adb server to release any lingering connections/ports
+        // summary.adbKill = await trySpawn('adb', ['kill-server']);
 
         // Ensure next emulator start is a fresh device (one-time wipe)
         setWipeOnceFlag();
