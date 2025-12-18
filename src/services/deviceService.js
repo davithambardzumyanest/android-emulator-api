@@ -212,8 +212,13 @@ const deviceService = {
             stdio: 'inherit', // pipe to parent's stdio to see logs in console
             shell: false,
             env: {
-                ANDROID_HOME: '/root/Android/Sdk',
+                ...process.env,                         // keep existing env
+                ANDROID_HOME: '/root/Android/Sdk',      // set correct SDK path
                 ANDROID_SDK_ROOT: '/root/Android/Sdk',
+                PATH: process.env.PATH
+                    + ':/root/Android/Sdk/emulator'
+                    + ':/root/Android/Sdk/platform-tools'
+                    + ':/root/Android/Sdk/tools'
             }
         });
 
