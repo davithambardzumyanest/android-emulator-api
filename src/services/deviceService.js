@@ -208,10 +208,20 @@ const deviceService = {
         }
 
         // Launch via nohup so the emulator survives SIGHUP and keeps running after parent exits
-        // This will create a nohup.out file in the current working directory if stdout/stderr are not redirected
+        // Redirect stdout/stderr to a log file, similar to '> /tmp/emulator.log 2>&1 &'
+        const logPath = process.env.EMULATOR_LOG_FILE || '/tmp/emulator.log';
+        let outFd;
+        try {
+            outFd = fs.openSync(logPath, 'a');
+        } catch (e) {
+            // Fallback to ignoring output if log file can't be opened
+            outFd = 'ignore';
+            logger.warn(`Failed to open log file ${logPath}: ${e.message}`);
+        }
+
         const emulatorProcess = spawn('nohup', ['emulator', ...args], {
             detached: true,   // runs child in its own process group
-            stdio: 'ignore'   // ignores stdin/stdout/stderr (nohup will fallback to nohup.out)
+            stdio: ['ignore', outFd, outFd]
         });
 
         // Fully detach so it continues running even if API exits
