@@ -133,7 +133,7 @@ const ActionEngine = {
           resolve();
         });
       });
-      handleSystemDialogs(serial)
+      await handleSystemDialogs(serial)
     } catch (e) {
       if (retryCount < MAX_RETRIES) {
         console.log(`[screenshot] Retrying... (${retryCount + 1}/${MAX_RETRIES})`);
