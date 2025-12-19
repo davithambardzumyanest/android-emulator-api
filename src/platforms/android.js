@@ -106,10 +106,38 @@ module.exports = {
     return { ok: true };
   },
 
-  async setGPS(device, { lat, lon }) {
+  async setGPS(device, { lat, lon, speed = 0, bearing = 0 }) {
     const serial = device?.meta?.deviceId;
-    // Many emulators support: adb emu geo fix <lon> <lat>
+    
+    // Set the location using geo fix
     await adb(`emu geo fix ${lon} ${lat}`, { serial });
+    
+    // If speed or bearing is provided, also set them using NMEA sentence
+    if (speed > 0 || bearing > 0) {
+      // Convert bearing to 0-360 range
+      const normalizedBearing = ((bearing % 360) + 360) % 360;
+      
+      // Convert speed from m/s to knots (1 m/s = 1.94384 knots)
+      const speedKnots = speed * 1.94384;
+      
+      // Format: $GPRMC,time,status,lat,N,lon,E,spd,cog,date,mv,mvE,mode*cs
+      // For simplicity, we're using a fixed time and date
+      const nmea = `$GPRMC,120000,A,${Math.abs(lat).toFixed(6)},${lat >= 0 ? 'N' : 'S'},` +
+                  `${Math.abs(lon).toFixed(6)},${lon >= 0 ? 'E' : 'W'},` +
+                  `${speedKnots.toFixed(2)},${normalizedBearing.toFixed(2)},191222,,,A*`;
+      
+      // Calculate checksum (XOR of all characters between $ and *)
+      let checksum = 0;
+      for (let i = 1; i < nmea.length - 1; i++) {
+        checksum ^= nmea.charCodeAt(i);
+      }
+      
+      const nmeaWithChecksum = `${nmea}${checksum.toString(16).toUpperCase().padStart(2, '0')}`;
+      
+      // Send the NMEA sentence to the emulator
+      await adb(`emu geo nmea ${nmeaWithChecksum}`, { serial });
+    }
+    
     return { ok: true };
   },
 
