@@ -180,34 +180,60 @@ module.exports = {
 
   async screenshotStream(device) {
     const serial = device?.meta?.deviceId;
+    if (!serial) {
+      throw new Error('Device serial number is required for taking screenshots');
+    }
     
     // Add a small delay to ensure the screen is fully rendered
     await new Promise(resolve => setTimeout(resolve, 300));
     
     return new Promise((resolve, reject) => {
-      const proc = exec(`adb -s ${serial} exec-out 'screencap -p'`);
+      console.log(`Taking screenshot from device: ${serial}`);
+      const command = `adb -s ${serial} exec-out "screencap -p"`;
+      console.log(`Executing: ${command}`);
+      
+      const proc = exec(command, { maxBuffer: 1024 * 1024 * 10 }); // 10MB buffer for larger screenshots
       const stream = new PassThrough();
       
       let stderr = '';
+      let stdoutLength = 0;
       
-      proc.stdout.pipe(stream);
+      proc.stdout.on('data', (chunk) => {
+        stdoutLength += chunk.length;
+        stream.write(chunk);
+      });
       
       proc.stderr.on('data', (data) => {
-        stderr += data.toString();
+        const errorMsg = data.toString().trim();
+        if (errorMsg) {
+          stderr += errorMsg;
+          console.error('screencap stderr:', errorMsg);
+        }
       });
       
       proc.on('close', (code) => {
         if (code !== 0) {
-          const error = new Error(`screencap failed with code ${code}: ${stderr}`);
+          const error = new Error(`screencap failed with code ${code}: ${stderr || 'Unknown error'}`);
+          console.error(error.message);
           stream.emit('error', error);
           reject(error);
         } else {
-          resolve(stream);
+          if (stdoutLength === 0) {
+            const error = new Error('Received empty screenshot data');
+            console.error(error.message);
+            stream.emit('error', error);
+            reject(error);
+          } else {
+            console.log(`Screenshot captured successfully (${stdoutLength} bytes)`);
+            stream.end();
+            resolve(stream);
+          }
         }
       });
       
       proc.on('error', (err) => {
         const error = new Error(`screencap process error: ${err.message}`);
+        console.error(error.message);
         stream.emit('error', error);
         reject(error);
       });
