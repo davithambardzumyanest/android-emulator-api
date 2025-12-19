@@ -11,7 +11,6 @@ const execAsync = promisify(exec);
  * @returns {Promise<boolean>} - true if a dialog was handled
  */
 async function handleSystemDialogs(serial) {
-    return await execAsync(`adb -s ${serial} shell input tap 540 1920`);
     try {
         const parser = new XMLParser({
             ignoreAttributes: false,
