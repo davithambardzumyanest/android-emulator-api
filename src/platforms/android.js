@@ -3,6 +3,9 @@ const { promisify } = require('util');
 const { PassThrough } = require('stream');
 const execAsync = promisify(exec);
 
+// Make exec available globally for the module
+const { exec: execSync } = require('child_process');
+
 // Helper to run adb commands, optionally targeting a specific device serial
 async function adb(command, { serial } = {}) {
   const prefix = serial ? `adb -s ${serial}` : 'adb';
@@ -172,71 +175,77 @@ module.exports = {
     await this.tap(device, { x: centerX, y: centerY });
     
     return { 
-      ok: true, 
       count: matchingNodes.length,
       bounds: { x1, y1, x2, y2 }
     };
   },
 
   async screenshotStream(device) {
+    const execAsync = promisify(exec);
+    
     const serial = device?.meta?.deviceId;
     if (!serial) {
       throw new Error('Device serial number is required for taking screenshots');
     }
-    
+
     // Add a small delay to ensure the screen is fully rendered
-    await new Promise(resolve => setTimeout(resolve, 300));
+    await new Promise(resolve => setTimeout(resolve, 500));
     
-    return new Promise((resolve, reject) => {
-      console.log(`Taking screenshot from device: ${serial}`);
-      const command = `adb -s ${serial} exec-out "screencap -p"`;
-      console.log(`Executing: ${command}`);
-      
-      const proc = exec(command, { maxBuffer: 1024 * 1024 * 10 }); // 10MB buffer for larger screenshots
-      const stream = new PassThrough();
-      
-      let stderr = '';
-      let stdoutLength = 0;
-      
-      proc.stdout.on('data', (chunk) => {
-        stdoutLength += chunk.length;
-        stream.write(chunk);
+    const command = `adb -s ${serial} exec-out screencap -p`;
+    console.log(`[screenshot] Taking screenshot from device: ${serial}`);
+    
+    try {
+      // First, try the direct method
+      const { stdout, stderr } = await execAsync(command, { 
+        encoding: 'buffer',
+        maxBuffer: 10 * 1024 * 1024 // 10MB buffer
       });
       
-      proc.stderr.on('data', (data) => {
-        const errorMsg = data.toString().trim();
-        if (errorMsg) {
-          stderr += errorMsg;
-          console.error('screencap stderr:', errorMsg);
-        }
-      });
+      if (!stdout || stdout.length === 0) {
+        throw new Error('Received empty screenshot data');
+      }
       
-      proc.on('close', (code) => {
-        if (code !== 0) {
-          const error = new Error(`screencap failed with code ${code}: ${stderr || 'Unknown error'}`);
-          console.error(error.message);
-          stream.emit('error', error);
-          reject(error);
-        } else {
-          if (stdoutLength === 0) {
-            const error = new Error('Received empty screenshot data');
-            console.error(error.message);
-            stream.emit('error', error);
-            reject(error);
-          } else {
-            console.log(`Screenshot captured successfully (${stdoutLength} bytes)`);
-            stream.end();
-            resolve(stream);
-          }
-        }
-      });
+      console.log(`[screenshot] Captured ${stdout.length} bytes of screenshot data`);
       
-      proc.on('error', (err) => {
-        const error = new Error(`screencap process error: ${err.message}`);
-        console.error(error.message);
-        stream.emit('error', error);
-        reject(error);
-      });
-    });
+      // Create a stream from the buffer
+      const { Readable } = require('stream');
+      const stream = new Readable();
+      stream.push(stdout);
+      stream.push(null); // Signal end of stream
+      
+      return stream;
+      
+    } catch (error) {
+      console.error('[screenshot] Error capturing screenshot:', error);
+      
+      // If direct method fails, try saving to a temporary file first
+      try {
+        console.log('[screenshot] Trying alternative method with temporary file...');
+        const tempFile = `/sdcard/screenshot-${Date.now()}.png`;
+        
+        // Save screenshot to device
+        await execAsync(`adb -s ${serial} shell screencap -p ${tempFile}`);
+        
+        // Pull the file
+        await execAsync(`adb -s ${serial} pull ${tempFile} /tmp/`);
+        
+        // Read the file
+        const fs = require('fs');
+        const filePath = `/tmp/screenshot-${Date.now()}.png`;
+        const fileStream = fs.createReadStream(filePath);
+        
+        // Clean up
+        fileStream.on('end', () => {
+          fs.unlink(filePath, () => {});
+          execAsync(`adb -s ${serial} shell rm ${tempFile}`).catch(() => {});
+        });
+        
+        return fileStream;
+        
+      } catch (fallbackError) {
+        console.error('[screenshot] Fallback method also failed:', fallbackError);
+        throw new Error(`Failed to capture screenshot: ${fallbackError.message}`);
+      }
+    }
   },
 };
