@@ -34,13 +34,14 @@ const ActionEngine = {
     return ctrl.closeApp(device, appId);
   },
   async tap(deviceId, payload) {
-    const device = deviceManager.ensure(deviceId);
-    const ctrl = controllerFor(device);
-    return ctrl.tap(device, payload);
-  },
-  async tap(deviceId, payload) {
     return withDialogHandling(deviceId,
         device => controllerFor(device).tap(device, payload)
+    );
+  },
+
+  async clickByText(deviceId, { text, exact = true, index = 0 }) {
+    return withDialogHandling(deviceId,
+      device => controllerFor(device).clickByText(device, { text, exact, index })
     );
   },
   async swipe(deviceId, payload) {

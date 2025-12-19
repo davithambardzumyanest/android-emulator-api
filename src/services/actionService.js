@@ -104,6 +104,29 @@ const actionService = {
   async screenshotStream(deviceId) {
     return ActionEngine.screenshotStream(deviceId);
   },
+  
+  async clickByText(deviceId, body) {
+    const { text, exact, index } = body || {};
+    if (typeof text !== 'string') {
+      const e = new Error("'text' is required and must be a string");
+      e.status = 400;
+      throw e;
+    }
+    
+    const clickParams = { text };
+    if (exact !== undefined) clickParams.exact = Boolean(exact);
+    if (index !== undefined) {
+      const idx = Number(index);
+      if (isNaN(idx) || idx < 0) {
+        const e = new Error("If provided, 'index' must be a non-negative number");
+        e.status = 400;
+        throw e;
+      }
+      clickParams.index = idx;
+    }
+    
+    return ActionEngine.clickByText(deviceId, clickParams);
+  },
 };
 
 module.exports = actionService;

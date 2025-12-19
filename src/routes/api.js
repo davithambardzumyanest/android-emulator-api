@@ -99,6 +99,19 @@ router.post('/devices/:id/tap', async (req, res) => {
   }
 });
 
+// Click by text
+router.post('/devices/:id/click-by-text', async (req, res) => {
+  try {
+    const result = await actionService.clickByText(req.params.id, req.body || {});
+    res.json(result);
+  } catch (e) {
+    res.status(e.status || 500).json({ 
+      error: e.message || 'click by text failed',
+      details: process.env.NODE_ENV === 'development' ? e.stack : undefined
+    });
+  }
+});
+
 router.post('/devices/:id/swipe', async (req, res) => {
   try {
     const result = await actionService.swipe(req.params.id, req.body || {});
