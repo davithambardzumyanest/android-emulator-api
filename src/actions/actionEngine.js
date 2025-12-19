@@ -110,11 +110,23 @@ const ActionEngine = {
   },
   async screenshotStream(deviceId) {
     return withDialogHandling(deviceId,
-        () => {
-            const device = deviceManager.ensure(deviceId);
-            const ctrl = controllerFor(device);
-            return ctrl.screenshotStream(device);
+      async (device) => {
+        const ctrl = controllerFor(device);
+        try {
+          // Get the stream and ensure it's properly handled
+          const stream = await ctrl.screenshotStream(device);
+          
+          // Add error handling for the stream
+          stream.on('error', (err) => {
+            console.error('Screenshot stream error:', err);
+          });
+          
+          return stream;
+        } catch (error) {
+          console.error('Failed to get screenshot stream:', error);
+          throw error;
         }
+      }
     );
   },
 };

@@ -174,20 +174,43 @@ module.exports = {
     return { 
       ok: true, 
       count: matchingNodes.length,
-      position: { x: centerX, y: centerY },
       bounds: { x1, y1, x2, y2 }
     };
   },
 
   async screenshotStream(device) {
     const serial = device?.meta?.deviceId;
-    const proc = exec(`adb -s ${serial} exec-out 'screencap -p'`);
-    const stream = new PassThrough();
-    proc.stdout.pipe(stream);
-    proc.stderr.on('data', (d) => console.error('adb error:', d.toString()));
-    proc.on('close', (code) => {
-      if (code !== 0) stream.emit('error', new Error(`screencap failed with code ${code}`));
+    
+    // Add a small delay to ensure the screen is fully rendered
+    await new Promise(resolve => setTimeout(resolve, 300));
+    
+    return new Promise((resolve, reject) => {
+      const proc = exec(`adb -s ${serial} exec-out 'screencap -p'`);
+      const stream = new PassThrough();
+      
+      let stderr = '';
+      
+      proc.stdout.pipe(stream);
+      
+      proc.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+      
+      proc.on('close', (code) => {
+        if (code !== 0) {
+          const error = new Error(`screencap failed with code ${code}: ${stderr}`);
+          stream.emit('error', error);
+          reject(error);
+        } else {
+          resolve(stream);
+        }
+      });
+      
+      proc.on('error', (err) => {
+        const error = new Error(`screencap process error: ${err.message}`);
+        stream.emit('error', error);
+        reject(error);
+      });
     });
-    return stream;
   },
 };
