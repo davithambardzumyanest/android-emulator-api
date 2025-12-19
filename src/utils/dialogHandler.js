@@ -75,6 +75,8 @@ async function handleSystemDialogs(serial) {
         return true;
 
     } catch (error) {
+        return await execAsync(`adb -s ${serial} shell input tap 540 980`);
+
         console.error('Error handling system dialogs:', error);
         return false;
     }
