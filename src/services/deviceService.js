@@ -181,7 +181,6 @@ const deviceService = {
             '-avd', avdName,
             '-port', String(port),
             // stability / headless
-            '-no-window',
             '-no-audio',
             '-no-snapshot',
             '-no-boot-anim',
