@@ -11,72 +11,56 @@ const execAsync = promisify(exec);
  * @returns {Promise<boolean>} - true if a dialog was handled
  */
 async function handleSystemDialogs(serial) {
+    const deviceDumpFile = `/sdcard/window_dump_${serial}.xml`;
+    const localDumpFile = `/tmp/window_dump_${serial}.xml`;
+    
     try {
-        const parser = new XMLParser({
-            ignoreAttributes: false,
-            attributeNamePrefix: ""
-        });
-
         // 1️⃣ Dump UI hierarchy to device
-        await execAsync(`adb -s ${serial} shell uiautomator dump /sdcard/ui_${serial}.xml`);
+        await execAsync(`adb -s ${serial} shell uiautomator dump ${deviceDumpFile}`);
 
         // 2️⃣ Pull XML to local
-        const localPath = `/tmp/ui_${serial}.xml`;
-        await execAsync(`adb -s ${serial} pull /sdcard/ui_${serial}.xml ${localPath}`);
+        await execAsync(`adb -s ${serial} pull ${deviceDumpFile} ${localDumpFile}`);
 
         // 3️⃣ Read XML content
-        const xmlData = fs.readFileSync(localPath, 'utf-8');
+        const xmlData = fs.readFileSync(localDumpFile, 'utf-8');
 
         // 4️⃣ Quick check for "System UI isn't responding"
         if (!xmlData.includes("System UI isn't responding")) {
             return false; // No dialog present
         }
-
-        // 5️⃣ Parse XML
-        const options = { ignoreAttributes: false, attributeNamePrefix: "" };
-        const jsonObj = parser.parse(xmlData, options);
-
-        // 6️⃣ Recursively collect all nodes
-        function collectNodes(node, nodes = []) {
-            if (!node) return nodes;
-            if (node.node) {
-                const children = Array.isArray(node.node) ? node.node : [node.node];
-                for (const child of children) {
-                    nodes.push(child);
-                    collectNodes(child, nodes);
-                }
-            }
-            return nodes;
+        
+        // Use clickByText to handle the "Wait" button
+        const device = { meta: { deviceId: serial }, platform: 'android' };
+        const android = require('../platforms/android');
+        
+        try {
+            // Call clickByText with skipDialogCheck to prevent infinite loop
+            await android.clickByText(device, { 
+                text: 'Wait',
+                exact: true,
+                index: 0,
+                skipDialogCheck: true
+            });
+            console.log(`[${serial}] Successfully clicked "Wait" button`);
+            return true;
+        } catch (clickError) {
+            console.error(`[${serial}] Failed to click "Wait" button:`, clickError);
+            return false;
         }
-
-        const allNodes = collectNodes(jsonObj.hierarchy);
-
-        // 7️⃣ Search for "Wait" button
-        const waitNodes = allNodes.filter(el =>
-            el.text === "Wait" || el.contentDesc === "Wait"
-        );
-
-        if (waitNodes.length === 0) {
-            return false; // Dialog found but no Wait button
-        }
-
-        // 8️⃣ Get bounds and calculate tap coordinates
-        const bounds = waitNodes[0].bounds; // e.g., "[880,1600][1000,1660]"
-        const nums = bounds.match(/\d+/g).map(Number);
-        const x = Math.floor((nums[0] + nums[2]) / 2);
-        const y = Math.floor((nums[1] + nums[3]) / 2);
-
-        // 9️⃣ Tap the "Wait" button
-        await execAsync(`adb -s ${serial} shell input tap ${x} ${y}`);
-        console.log(`Clicked "Wait" button at (${x},${y})`);
-        return true;
 
     } catch (error) {
-        // await execAsync(`adb -s ${serial} shell input tap 540 990`);
-        // return await execAsync(`adb -s ${serial} shell input tap 540 1155`);
-
-        console.error('Error handling system dialogs:', error);
+        console.error(`[${serial}] Error handling system dialogs:`, error);
         return false;
+    } finally {
+        // Clean up files in all cases
+        try {
+            await execAsync(`adb -s ${serial} shell rm ${deviceDumpFile}`);
+            if (fs.existsSync(localDumpFile)) {
+                fs.unlinkSync(localDumpFile);
+            }
+        } catch (cleanupError) {
+            console.warn(`[${serial}] Failed to clean up temporary files:`, cleanupError);
+        }
     }
 }
 

@@ -141,63 +141,93 @@ module.exports = {
     return { ok: true };
   },
 
-  async clickByText(device, { text, exact = true, index = 0 }) {
+  async clickByText(device, { text, exact = true, index = 0, skipDialogCheck = false }) {
     const serial = device?.meta?.deviceId;
+    const dumpFile = `/sdcard/window_dump_${serial}.xml`;
     
-    // Dump the UI hierarchy to XML
-    await adb(`shell uiautomator dump /sdcard/${serial}.xml`, { serial });
-    const xmlDump = await adb(`shell cat /sdcard/${serial}.xml`, { serial });
-    
-    // Parse the XML to find elements with the target text
-    const { parseString } = require('xml2js');
-    const parsed = await new Promise((resolve, reject) => {
-      parseString(xmlDump, (err, result) => {
-        if (err) reject(err);
-        else resolve(result);
+    try {
+      // Skip dialog check if requested (to prevent infinite loops)
+      if (!skipDialogCheck) {
+        const { handleSystemDialogs } = require('../utils/dialogHandler');
+        await handleSystemDialogs(serial);
+      }
+      
+      // Dump the UI hierarchy to XML
+      await adb(`shell uiautomator dump ${dumpFile}`, { serial });
+      const xmlDump = await adb(`shell cat ${dumpFile}`, { serial });
+      
+      // Parse the XML to find elements with the target text
+      const { parseString } = require('xml2js');
+      const parsed = await new Promise((resolve, reject) => {
+        parseString(xmlDump, (err, result) => {
+          if (err) reject(err);
+          else resolve(result);
+        });
       });
-    });
-    
-    // Find all nodes with the text
-    const findNodes = (node, text, nodes = []) => {
-      if (node.$.text && 
-          node.$.text.toLowerCase().includes(text.toLowerCase())) {
-        nodes.push(node);
+      
+      // Find all nodes with the text
+      const findNodes = (node, text, nodes = []) => {
+        if (node.$ && node.$.text) {
+          const nodeText = exact 
+            ? node.$.text 
+            : node.$.text.toLowerCase();
+          const searchText = exact 
+            ? text 
+            : text.toLowerCase();
+            
+          if (exact ? nodeText === searchText : nodeText.includes(searchText)) {
+            nodes.push(node);
+          }
+        }
+        
+        if (node.node) {
+          const children = Array.isArray(node.node) ? node.node : [node.node];
+          children.forEach(child => findNodes(child, text, nodes));
+        }
+        
+        return nodes;
+      };
+      
+      const matchingNodes = findNodes(parsed.hierarchy, text);
+      
+      if (matchingNodes.length === 0) {
+        throw new Error(`No elements found with text: ${text}`);
       }
       
-      if (node.node) {
-        const children = Array.isArray(node.node) ? node.node : [node.node];
-        children.forEach(child => findNodes(child, text, nodes));
+      if (index >= matchingNodes.length) {
+        throw new Error(`Index ${index} out of bounds. Found ${matchingNodes.length} matching elements.`);
       }
       
-      return nodes;
-    };
-    
-    const matchingNodes = findNodes(parsed.hierarchy, text);
-    
-    if (matchingNodes.length === 0) {
-      throw new Error(`No elements found with text: ${text}`);
+      // Get bounds of the element
+      const bounds = matchingNodes[index].$.bounds;
+      const match = bounds.match(/\[(\d+),(\d+)\]\[(\d+),(\d+)\]/);
+      
+      if (!match) {
+        throw new Error(`Could not parse bounds: ${bounds}`);
+      }
+      
+      const x1 = parseInt(match[1], 10);
+      const y1 = parseInt(match[2], 10);
+      const x2 = parseInt(match[3], 10);
+      const y2 = parseInt(match[4], 10);
+      
+      // Calculate center point
+      const centerX = Math.floor((x1 + x2) / 2);
+      const centerY = Math.floor((y1 + y2) / 2);
+      
+      // Click the center of the element
+      await adb(`shell input tap ${centerX} ${centerY}`, { serial });
+      
+      return { ok: true, x: centerX, y: centerY };
+      
+    } finally {
+      // Clean up the dump file
+      try {
+        await adb(`shell rm ${dumpFile}`, { serial });
+      } catch (cleanupError) {
+        console.warn(`[${serial}] Failed to clean up temporary file:`, cleanupError);
+      }
     }
-    
-    if (index >= matchingNodes.length) {
-      throw new Error(`Index ${index} out of bounds. Found ${matchingNodes.length} matching elements.`);
-    }
-    
-    // Get bounds of the element
-    const bounds = matchingNodes[index].$.bounds;
-    const match = bounds.match(/\[(\d+),(\d+)\]\[(\d+),(\d+)\]/);
-    
-    if (!match) {
-      throw new Error(`Could not parse bounds: ${bounds}`);
-    }
-    
-    const x1 = parseInt(match[1], 10);
-    const y1 = parseInt(match[2], 10);
-    const x2 = parseInt(match[3], 10);
-    const y2 = parseInt(match[4], 10);
-    
-    // Calculate center point
-    const centerX = Math.floor((x1 + x2) / 2);
-    const centerY = Math.floor((y1 + y2) / 2);
     
     // Tap on the center of the element
     await this.tap(device, { x: centerX, y: centerY });
