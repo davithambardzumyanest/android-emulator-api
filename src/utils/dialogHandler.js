@@ -16,7 +16,7 @@ async function handleSystemDialogs(serial) {
     
     try {
         // 1️⃣ Dump UI hierarchy to device
-        await execAsync(`adb -s ${serial} shell uiautomator dump ${deviceDumpFile}`);
+        await execAsync(`adb -s ${serial} shell uiautomator dump --compressed ${deviceDumpFile}`);
 
         // 2️⃣ Pull XML to local
         await execAsync(`adb -s ${serial} pull ${deviceDumpFile} ${localDumpFile}`);
@@ -24,29 +24,45 @@ async function handleSystemDialogs(serial) {
         // 3️⃣ Read XML content
         const xmlData = fs.readFileSync(localDumpFile, 'utf-8');
 
-        // 4️⃣ Quick check for "System UI isn't responding"
-        if (!xmlData.includes("System UI isn't responding")) {
+        // 4️⃣ Check for any system dialogs that need handling
+        const hasSystemDialog = (
+            xmlData.includes("System UI isn't responding") || 
+            xmlData.includes('com.android.systemui') ||
+            xmlData.includes('android:id/alertTitle')
+        );
+
+        if (!hasSystemDialog) {
             return false; // No dialog present
         }
         
-        // Use clickByText to handle the "Wait" button
+        console.log(`[${serial}] System dialog detected, attempting to handle...`);
+        
+        // Use clickByText to handle the "Wait" button or other dialog buttons
         const device = { meta: { deviceId: serial }, platform: 'android' };
         const android = require('../platforms/android');
         
-        try {
-            // Call clickByText with skipDialogCheck to prevent infinite loop
-            await android.clickByText(device, { 
-                text: 'Wait',
-                exact: true,
-                index: 0,
-                skipDialogCheck: true
-            });
-            console.log(`[${serial}] Successfully clicked "Wait" button`);
-            return true;
-        } catch (clickError) {
-            console.error(`[${serial}] Failed to click "Wait" button:`, clickError);
-            return false;
+        // Try to find and click common dialog buttons in order of preference
+        const buttonsToTry = ['Wait', 'OK', 'Dismiss', 'Close', 'Yes', 'No', 'Cancel'];
+        
+        for (const buttonText of buttonsToTry) {
+            try {
+                await android.clickByText(device, { 
+                    text: buttonText,
+                    exact: true,
+                    index: 0,
+                    skipDialogCheck: true
+                });
+                console.log(`[${serial}] Successfully clicked "${buttonText}" button`);
+                return true;
+            } catch (clickError) {
+                // Ignore and try the next button
+                continue;
+            }
         }
+        
+        // If we get here, no known buttons were found
+        console.warn(`[${serial}] No known dialog buttons found to click`);
+        return false;
 
     } catch (error) {
         console.error(`[${serial}] Error handling system dialogs:`, error);

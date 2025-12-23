@@ -40,123 +40,85 @@ const ActionEngine = {
         device => controllerFor(device).tap(device, payload)
     );
   },
-
   async clickByText(deviceId, {text, exact = true, index = 0}) {
     return withDialogHandling(deviceId,
         device => controllerFor(device).clickByText(device, {text, exact, index})
     );
   },
-  async swipe(deviceId, payload) {
-    const device = deviceManager.ensure(deviceId);
-    const ctrl = controllerFor(device);
-    return ctrl.swipe(device, payload);
-  },
-  async type(deviceId, payload) {
-    const device = deviceManager.ensure(deviceId);
-    const ctrl = controllerFor(device);
-    return ctrl.type(device, payload);
-  },
-  async back(deviceId) {
-    const device = deviceManager.ensure(deviceId);
-    const ctrl = controllerFor(device);
-    return ctrl.back(device);
-  },
-  async home(deviceId) {
-    const device = deviceManager.ensure(deviceId);
-    const ctrl = controllerFor(device);
-    return ctrl.home(device);
-  },
-  async rotate(deviceId, payload) {
-    const device = deviceManager.ensure(deviceId);
-    const ctrl = controllerFor(device);
-    return ctrl.rotate(device, payload);
-  },
-  async intent(deviceId, payload) {
-    const device = deviceManager.ensure(deviceId);
-    const ctrl = controllerFor(device);
-    if (typeof ctrl.intent !== 'function') {
-      const e = new Error('Intent not supported on this platform');
-      e.status = 501;
-      throw e;
-    }
-    return ctrl.intent(device, payload);
-  },
-  async setGPS(deviceId, payload) {
-    const device = deviceManager.ensure(deviceId);
-    const ctrl = controllerFor(device);
-    return ctrl.setGPS(device, payload);
-  },
-  async simulateRoute(deviceId, {points, intervalMs = 1500, loop = false}) {
-    const device = deviceManager.ensure(deviceId);
-    if (!device.tasks.route) device.tasks.route = {};
-    const ctrl = controllerFor(device);
-    const taskId = `route-${Date.now()}`;
-    let idx = 0;
 
-    const tick = async () => {
-      try {
-        if (!points || points.length === 0) return;
-        const p = points[idx];
-        await ctrl.setGPS(device, {lat: p.lat, lon: p.lon});
-        idx += 1;
-        if (idx >= points.length) {
-          if (loop) idx = 0; else clearInterval(device.tasks.route[taskId]);
-        }
-      } catch (e) {
-        clearInterval(device.tasks.route[taskId]);
-      }
-    };
-
-    device.tasks.route[taskId] = setInterval(tick, intervalMs);
-    return {ok: true, taskId};
-  },
   async screenshotStream(deviceId, retryCount = 0) {
-    const MAX_RETRIES = 2;
+    const MAX_RETRIES = 3;
     const device = deviceManager.ensure(deviceId);
     const serial = device?.meta?.deviceId;
-    const attempt = retryCount + 1;
+    const {promisify} = require('util');
+    const {exec} = require('child_process');
+    const execAsync = promisify(exec);
 
     if (!serial) {
       throw new Error('Device serial number is not available');
     }
 
-    console.log(`[screenshot] Taking screenshot from device: ${serial}`);
-    
+    console.log(`[${serial}] [${retryCount + 1}/${MAX_RETRIES}] taking screenshot...`);
+
     // First, ensure the emulator is responsive
     try {
-      await new Promise((resolve, reject) => {
-        exec(`adb -s ${serial} shell getprop dev.bootcomplete`, (error, stdout) => {
-          if (error || !stdout.toString().includes('1')) {
-            console.log('[screenshot] Emulator not fully booted, waiting...');
-            return reject(new Error('Emulator not ready'));
-          }
-          resolve();
-        });
-      });
-      await handleSystemDialogs(serial)
+      // Check if device is online
+      const {stdout: devices} = await execAsync('adb devices');
+      if (!devices.includes(serial)) {
+        throw new Error('Device not found in adb devices');
+      }
+
+      // Check if device is booted
+      const {stdout: bootStatus} = await execAsync(`adb -s ${serial} shell getprop sys.boot_completed`);
+      if (bootStatus.trim() !== '1') {
+        throw new Error('Device not fully booted');
+      }
+
+      // Handle any system dialogs
+      const dialogHandled = await handleSystemDialogs(serial);
+      if (dialogHandled) {
+        console.log(`[${serial}] Handled system dialog, retrying screenshot...`);
+        // Small delay to let the dialog close
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+
     } catch (e) {
-      if (retryCount < MAX_RETRIES) {
-        console.log(`[screenshot] Retrying... (${retryCount + 1}/${MAX_RETRIES})`);
-        await new Promise(resolve => setTimeout(resolve, 2000));
+      console.error(`[${serial}] Device check failed:`, e.message);
+      if (retryCount < MAX_RETRIES - 1) {
+        const delay = 2000 * (retryCount + 1); // Exponential backoff
+        console.log(`[${serial}] Retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
         return this.screenshotStream(deviceId, retryCount + 1);
       }
-      throw new Error('Emulator not responding. Please ensure the emulator is fully booted.');
+      throw new Error(`Device not responding: ${e.message}`);
     }
 
-    return new Promise((resolve, reject) => {
+    try {
+      // Try direct screencap first (faster)
       const command = `adb -s ${serial} exec-out screencap -p`;
-      console.log(`[screenshot] Attempt ${attempt} - Executing: ${command}`);
+      console.log(`[${serial}] Executing: ${command}`);
 
       const proc = exec(command, {
         encoding: 'buffer',
-        maxBuffer: 10 * 1024 * 1024 // 10MB buffer for large screenshots
+        maxBuffer: 20 * 1024 * 1024, // 20MB buffer for large screenshots
+        timeout: 10000 // 10 second timeout
       });
 
       const stream = new PassThrough();
       let stderr = '';
       let stdoutLength = 0;
+      let hasData = false;
+
+      // Set a timeout for the entire operation
+      const timeout = setTimeout(() => {
+        if (!hasData) {
+          proc.kill();
+          stream.emit('error', new Error('Screenshot operation timed out'));
+        }
+      }, 15000);
 
       proc.stdout.on('data', (chunk) => {
+        if (!hasData) hasData = true;
         stdoutLength += chunk.length;
         stream.write(chunk);
       });
@@ -165,35 +127,65 @@ const ActionEngine = {
         const errorMsg = data.toString().trim();
         if (errorMsg) {
           stderr += errorMsg;
-          console.error(`[screenshot] stderr:`, errorMsg);
+          console.error(`[${serial}] stderr:`, errorMsg);
         }
       });
 
-      proc.on('close', (code) => {
-        if (code !== 0) {
-          const error = new Error(`screencap failed with code ${code}: ${stderr || 'No error details'}`);
-          console.error(`[screenshot] Error:`, error.message);
-          stream.emit('error', error);
-          reject(error);
-        } else if (stdoutLength === 0) {
-          const error = new Error('Received empty screenshot data');
-          console.error(`[screenshot] Error:`, error.message);
-          stream.emit('error', error);
-          reject(error);
-        } else {
-          console.log(`[screenshot] Captured ${stdoutLength} bytes of screenshot data`);
+      return new Promise((resolve, reject) => {
+        proc.on('close', (code) => {
+          clearTimeout(timeout);
+
+          if (code !== 0 || !hasData) {
+            const error = new Error(
+                code !== 0
+                    ? `screencap failed with code ${code}: ${stderr || 'No error details'}`
+                    : 'No screenshot data received'
+            );
+
+            if (retryCount < MAX_RETRIES - 1) {
+              console.warn(`[${serial}] ${error.message}, retrying...`);
+              setTimeout(() => {
+                resolve(this.screenshotStream(deviceId, retryCount + 1));
+              }, 1000);
+            } else {
+              console.error(`[${serial}] Failed after ${MAX_RETRIES} attempts:`, error.message);
+              reject(error);
+            }
+            return;
+          }
+
+          console.log(`[${serial}] Captured ${stdoutLength} bytes of screenshot data`);
           stream.end();
           resolve(stream);
-        }
+        });
+
+        proc.on('error', (err) => {
+          clearTimeout(timeout);
+          console.error(`[${serial}] Process error:`, err.message);
+
+          if (retryCount < MAX_RETRIES - 1) {
+            console.log(`[${serial}] Retrying after error...`);
+            setTimeout(() => {
+              resolve(this.screenshotStream(deviceId, retryCount + 1));
+            }, 1000);
+          } else {
+            reject(new Error(`Failed to capture screenshot: ${err.message}`));
+          }
+        });
       });
 
-      proc.on('error', (err) => {
-        const error = new Error(`screencap process error: ${err.message}`);
-        console.error(`[screenshot] Process error:`, error.message);
-        stream.emit('error', error);
-        reject(error);
-      });
-    });
+    } catch (error) {
+      console.error(`[${serial}] Error in screenshot capture:`, error);
+
+      if (retryCount < MAX_RETRIES - 1) {
+        console.log(`[${serial}] Retrying after error...`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        return this.screenshotStream(deviceId, retryCount + 1);
+      }
+
+      throw error;
+    }
+
   }
 }
 
