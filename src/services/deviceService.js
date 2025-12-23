@@ -180,14 +180,15 @@ const deviceService = {
         const args = [
             '-avd', avdName,
             '-port', String(port),
-            '-no-snapshot',        // don’t use snapshots, ensures clean boot
-            '-no-audio',           // disable audio for headless
-            '-no-boot-anim',       // skip boot animation for faster start
-            '-gpu', 'off', // software GPU for headless
+            // stability / headless
+            '-no-window',
+            '-no-audio',
+            '-no-snapshot',
+            '-no-boot-anim',
+            '-gpu', 'swiftshader_indirect', // software GPU for headless
             '-memory', '2048',     // increase RAM to 8GB for stability
             '-cores', '2',         // increase CPU cores if server allows
             '-netfast',            // optimize network emulation
-            '-no-window',          // run headless
             // '-wipe-data',          // optional: ensures fresh emulator state
             // '-verbose',            // logs more info, useful for debugging
             '-read-only'           // optional if you plan multiple instances of the same AVD
