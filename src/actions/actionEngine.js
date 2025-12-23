@@ -45,7 +45,70 @@ const ActionEngine = {
         device => controllerFor(device).clickByText(device, {text, exact, index})
     );
   },
+  async swipe(deviceId, payload) {
+    const device = deviceManager.ensure(deviceId);
+    const ctrl = controllerFor(device);
+    return ctrl.swipe(device, payload);
+  },
+  async type(deviceId, payload) {
+    const device = deviceManager.ensure(deviceId);
+    const ctrl = controllerFor(device);
+    return ctrl.type(device, payload);
+  },
+  async back(deviceId) {
+    const device = deviceManager.ensure(deviceId);
+    const ctrl = controllerFor(device);
+    return ctrl.back(device);
+  },
+  async home(deviceId) {
+    const device = deviceManager.ensure(deviceId);
+    const ctrl = controllerFor(device);
+    return ctrl.home(device);
+  },
+  async rotate(deviceId, payload) {
+    const device = deviceManager.ensure(deviceId);
+    const ctrl = controllerFor(device);
+    return ctrl.rotate(device, payload);
+  },
+  async intent(deviceId, payload) {
+    const device = deviceManager.ensure(deviceId);
+    const ctrl = controllerFor(device);
+    if (typeof ctrl.intent !== 'function') {
+      const e = new Error('Intent not supported on this platform');
+      e.status = 501;
+      throw e;
+    }
+    return ctrl.intent(device, payload);
+  },
+  async setGPS(deviceId, payload) {
+    const device = deviceManager.ensure(deviceId);
+    const ctrl = controllerFor(device);
+    return ctrl.setGPS(device, payload);
+  },
+  async simulateRoute(deviceId, {points, intervalMs = 1500, loop = false}) {
+    const device = deviceManager.ensure(deviceId);
+    if (!device.tasks.route) device.tasks.route = {};
+    const ctrl = controllerFor(device);
+    const taskId = `route-${Date.now()}`;
+    let idx = 0;
 
+    const tick = async () => {
+      try {
+        if (!points || points.length === 0) return;
+        const p = points[idx];
+        await ctrl.setGPS(device, {lat: p.lat, lon: p.lon});
+        idx += 1;
+        if (idx >= points.length) {
+          if (loop) idx = 0; else clearInterval(device.tasks.route[taskId]);
+        }
+      } catch (e) {
+        clearInterval(device.tasks.route[taskId]);
+      }
+    };
+
+    device.tasks.route[taskId] = setInterval(tick, intervalMs);
+    return {ok: true, taskId};
+  },
   async screenshotStream(deviceId, retryCount = 0) {
     const MAX_RETRIES = 3;
     const device = deviceManager.ensure(deviceId);
