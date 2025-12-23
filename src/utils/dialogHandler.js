@@ -18,11 +18,11 @@ async function handleSystemDialogs(serial) {
         });
 
         // 1️⃣ Dump UI hierarchy to device
-        await execAsync(`adb -s ${serial} shell uiautomator dump /sdcard/ui.xml`);
+        await execAsync(`adb -s ${serial} shell uiautomator dump /sdcard/ui_${serial}.xml`);
 
         // 2️⃣ Pull XML to local
         const localPath = `/tmp/ui_${serial}.xml`;
-        await execAsync(`adb -s ${serial} pull /sdcard/ui.xml ${localPath}`);
+        await execAsync(`adb -s ${serial} pull /sdcard/ui_${serial}.xml ${localPath}`);
 
         // 3️⃣ Read XML content
         const xmlData = fs.readFileSync(localPath, 'utf-8');

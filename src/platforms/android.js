@@ -145,8 +145,8 @@ module.exports = {
     const serial = device?.meta?.deviceId;
     
     // Dump the UI hierarchy to XML
-    await adb(`shell uiautomator dump /sdcard/window_dump.xml`, { serial });
-    const xmlDump = await adb(`shell cat /sdcard/window_dump.xml`, { serial });
+    await adb(`shell uiautomator dump /sdcard/${serial}.xml`, { serial });
+    const xmlDump = await adb(`shell cat /sdcard/${serial}.xml`, { serial });
     
     // Parse the XML to find elements with the target text
     const { parseString } = require('xml2js');
