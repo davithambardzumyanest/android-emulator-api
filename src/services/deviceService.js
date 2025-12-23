@@ -191,7 +191,13 @@ const deviceService = {
             '-netfast',            // optimize network emulation
             // '-wipe-data',          // optional: ensures fresh emulator state
             // '-verbose',            // logs more info, useful for debugging
-            '-read-only'           // optional if you plan multiple instances of the same AVD
+            '-read-only',           // optional if you plan multiple instances of the same AVD
+
+
+            // reduce extra load
+            '-camera-back', 'none',
+            '-camera-front', 'none',
+            '-accel', 'off',
         ];
 
         // Headless mode via env
