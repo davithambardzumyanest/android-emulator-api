@@ -54,7 +54,6 @@ async function handleSystemDialogs(serial) {
     } finally {
         // Clean up files in all cases
         try {
-            await execAsync(`adb -s ${serial} shell rm ${deviceDumpFile}`);
             if (fs.existsSync(localDumpFile)) {
                 fs.unlinkSync(localDumpFile);
             }

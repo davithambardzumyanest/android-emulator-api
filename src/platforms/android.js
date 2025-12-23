@@ -221,12 +221,6 @@ module.exports = {
       return { ok: true, x: centerX, y: centerY };
       
     } finally {
-      // Clean up the dump file
-      try {
-        await adb(`shell rm ${dumpFile}`, { serial });
-      } catch (cleanupError) {
-        console.warn(`[${serial}] Failed to clean up temporary file:`, cleanupError);
-      }
     }
     
     // Tap on the center of the element
