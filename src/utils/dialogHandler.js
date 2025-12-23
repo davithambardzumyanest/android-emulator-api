@@ -27,9 +27,6 @@ async function handleSystemDialogs(serial) {
         // 3️⃣ Read XML content
         const xmlData = fs.readFileSync(localPath, 'utf-8');
 
-        console.log('xmlData')
-        console.log(xmlData)
-
         // 4️⃣ Quick check for "System UI isn't responding"
         if (!xmlData.includes("System UI isn't responding")) {
             return false; // No dialog present
@@ -53,7 +50,7 @@ async function handleSystemDialogs(serial) {
         }
 
         const allNodes = collectNodes(jsonObj.hierarchy);
-        console.log(allNodes)
+
         // 7️⃣ Search for "Wait" button
         const waitNodes = allNodes.filter(el =>
             el.text === "Wait" || el.contentDesc === "Wait"
