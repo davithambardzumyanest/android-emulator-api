@@ -197,6 +197,7 @@ const deviceService = {
             '-read-only',           // optional if you plan multiple instances of the same AVD
             '-camera-back', 'none',
             '-camera-front', 'none',
+            '-feature',  '-Vulkan'
         ];
 
         // Headless mode via env
