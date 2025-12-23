@@ -184,12 +184,12 @@ const deviceService = {
             // KVM acceleration
             '-accel', 'on',
 
-            '-no-snapshot',        // don’t use snapshots, ensures clean boot
+            '-no-snapshot', '-no-snapshot-save',        // don’t use snapshots, ensures clean boot
             '-no-audio',           // disable audio for headless
             '-no-boot-anim',       // skip boot animation for faster start
-            '-gpu', 'swiftshader_indirect', // software GPU for headless
+            '-gpu', 'auto', // software GPU for headless
             '-memory', '4096',     // increase RAM to 8GB for stability
-            '-cores', '4',         // increase CPU cores if server allows
+            '-cores', '8',         // increase CPU cores if server allows
             '-netfast',            // optimize network emulation
             '-no-window',          // run headless
             '-wipe-data',          // optional: ensures fresh emulator state
