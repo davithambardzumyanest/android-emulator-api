@@ -27,6 +27,7 @@ async function handleSystemDialogs(serial) {
         // 4️⃣ Check for any system dialogs that need handling
         const hasSystemDialog = (
             xmlData.includes("System UI isn't responding") || 
+            xmlData.includes("isn't responding") ||
             xmlData.includes('com.android.systemui') ||
             xmlData.includes('android:id/alertTitle')
         );
