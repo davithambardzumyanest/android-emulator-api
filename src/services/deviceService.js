@@ -189,7 +189,7 @@ const deviceService = {
             '-no-boot-anim',       // skip boot animation for faster start
             '-gpu', 'auto', // software GPU for headless
             '-memory', '4096',     // increase RAM to 8GB for stability
-            '-cores', '8',         // increase CPU cores if server allows
+            '-cores', '4',         // increase CPU cores if server allows
             '-netfast',            // optimize network emulation
             '-no-window',          // run headless
             '-wipe-data',          // optional: ensures fresh emulator state
