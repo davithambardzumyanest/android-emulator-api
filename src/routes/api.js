@@ -10,8 +10,8 @@ router.get('/', (_req, res) => {
 // Cleanup: stop all emulators and kill lingering processes
 router.post('/cleanup', async (_req, res) => {
   try {
-    const summary = await deviceService.cleanupAll();
-    res.json({ success: true, ...summary });
+    deviceService.cleanupAll();
+    res.json({ success: true });
   } catch (e) {
     res.status(e.status || 500).json({ success: false, error: e.message || 'cleanup failed' });
   }
