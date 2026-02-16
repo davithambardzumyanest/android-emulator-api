@@ -4,10 +4,10 @@ const deviceService = require('../services/deviceService');
 const actionService = require('../services/actionService');
 
 router.get('/', (_req, res) => {
-  res.json({ name: 'Unified Mobile Emulator API', status: 'ok' });
+  res.json({ name: 'iOS Simulator API', status: 'ok' });
 });
 
-// Cleanup: stop all emulators and kill lingering processes
+// Cleanup: stop all simulators and cleanup processes
 router.post('/cleanup', async (_req, res) => {
   try {
     deviceService.cleanupAll();
@@ -30,20 +30,19 @@ router.post('/devices/register', async (req, res) => {
       status: device.status,
       meta: device.meta,
       registeredAt: device.createdAt,
-      emulator: device.platform === 'android' ? {
-        name: device.meta.emulator?.name,
-        port: device.meta.emulator?.port,
-        pid: device.meta.emulator?.pid,
-        command: device.meta.emulator?.command
+      simulator: device.platform === 'ios' ? {
+        deviceId: device.meta.simulator?.deviceId,
+        name: device.meta.simulator?.name,
+        command: device.meta.simulator?.command
       } : undefined
     };
 
-    // Log the command that was used to start the emulator
-    if (device.platform === 'android' && device.meta.emulator?.command) {
-      console.log('\nEmulator started with command:');
-      console.log(device.meta.emulator.command);
-      console.log('\nTo connect to this emulator manually, use:');
-      console.log(`adb connect 127.0.0.1:${device.meta.emulator.port}`);
+    // Log the command that was used to start the simulator
+    if (device.platform === 'ios' && device.meta.simulator?.command) {
+      console.log('\nSimulator started with command:');
+      console.log(device.meta.simulator.command);
+      console.log('\nTo connect to this simulator manually, use:');
+      console.log(`xcrun simctl ${device.meta.simulator.deviceId} ...`);
     }
 
     res.json(response);
@@ -89,26 +88,13 @@ router.post('/devices/:id/close', async (req, res) => {
   }
 });
 
-// Global actions
+// UI Actions
 router.post('/devices/:id/tap', async (req, res) => {
   try {
     const result = await actionService.tap(req.params.id, req.body || {});
     res.json(result);
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message || 'tap failed' });
-  }
-});
-
-// Click by text
-router.post('/devices/:id/click-by-text', async (req, res) => {
-  try {
-    const result = await actionService.clickByText(req.params.id, req.body || {});
-    res.json(result);
-  } catch (e) {
-    res.status(e.status || 500).json({ 
-      error: e.message || 'click by text failed',
-      details: process.env.NODE_ENV === 'development' ? e.stack : undefined
-    });
   }
 });
 
@@ -157,33 +143,7 @@ router.post('/devices/:id/rotate', async (req, res) => {
   }
 });
 
-// Execute arbitrary adb subcommands on the mapped emulator
-// Example body: { "command": "shell pm grant com.google.android.apps.maps android.permission.ACCESS_FINE_LOCATION" }
-router.post('/devices/:id/adb', async (req, res) => {
-  try {
-    const { command } = req.body || {};
-    if (!command || (typeof command === 'string' && command.trim().length === 0)) {
-      return res.status(400).json({ success: false, error: "'command' is required" });
-    }
-
-    const result = await deviceService.executeAdb(req.params.id, command);
-    res.json({ success: true, stdout: result.stdout, stderr: result.stderr });
-  } catch (e) {
-    res.status(e.status || 500).json({ success: false, error: e.message || 'adb failed' });
-  }
-});
-
-// Android intents (VIEW, navigation, geo, etc.)
-router.post('/devices/:id/intent', async (req, res) => {
-  try {
-    const result = await actionService.intent(req.params.id, req.body || {});
-    res.json(result);
-  } catch (e) {
-    res.status(e.status || 500).json({ error: e.message || 'intent failed' });
-  }
-});
-
-// GPS
+// GPS and Location
 router.post('/devices/:id/gps/set', async (req, res) => {
   try {
     const result = await actionService.setGPS(req.params.id, req.body || {});
@@ -202,7 +162,7 @@ router.post('/devices/:id/gps/route', async (req, res) => {
   }
 });
 
-// Screenshot
+// Screenshots
 router.post('/devices/:id/screenshot', async (req, res) => {
   try {
     const stream = await actionService.screenshotStream(req.params.id);

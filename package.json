@@ -1,17 +1,16 @@
 {
-  "name": "android-emulator-api",
+  "name": "ios-simulator-api",
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js"
   },
-  "keywords": [],
+  "keywords": ["ios", "simulator", "mobile", "automation", "api", "xcrun", "simctl"],
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "HTTP API for orchestrating iOS simulators for automation and testing",
   "dependencies": {
-    "adbkit": "^2.11.1",
     "axios": "^1.13.2",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
