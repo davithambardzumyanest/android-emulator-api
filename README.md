@@ -147,6 +147,35 @@ Below is a concise list of primary endpoints. All bodies are JSON unless noted.
 - **POST /devices/:id/gps/route** – simulate route along points.
   - Body: `{ "points": [{"lat":..,"lon":..}, ...], "intervalMs": 2000, "loop": false }`
 
+### Raw Command Execution (iOS-only)
+
+- **POST /devices/:id/xcrun** – execute arbitrary `xcrun simctl` command for registered device.
+  - Body: `{ "command": "launch com.apple.mobilesafari" }`
+  - The command should be the simctl subcommand and arguments (without device ID).
+  - The device ID is automatically injected from the registered device.
+  - Examples:
+    ```bash
+    # Launch Safari
+    curl -X POST http://localhost:3000/devices/<DEVICE_ID>/xcrun \
+      -H 'Content-Type: application/json' \
+      -d '{"command": "launch com.apple.mobilesafari"}'
+    
+    # Open URL
+    curl -X POST http://localhost:3000/devices/<DEVICE_ID>/xcrun \
+      -H 'Content-Type: application/json' \
+      -d '{"command": "openurl https://example.com"}'
+    
+    # Get device info
+    curl -X POST http://localhost:3000/devices/<DEVICE_ID>/xcrun \
+      -H 'Content-Type: application/json' \
+      -d '{"command": "list devices"}'
+    
+    # Install app
+    curl -X POST http://localhost:3000/devices/<DEVICE_ID>/xcrun \
+      -H 'Content-Type: application/json' \
+      -d '{"command": "install /path/to/app.app"}'
+    ```
+
 ### Media and Screenshots
 
 - **POST /devices/:id/screenshot** – returns a PNG stream once.

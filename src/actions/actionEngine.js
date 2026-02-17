@@ -13,6 +13,11 @@ const ActionEngine = {
     const ctrl = controllerFor(device);
     return ctrl.launchApp(device, appId);
   },
+  async openUrl(deviceId, url) {
+    const device = deviceManager.ensure(deviceId);
+    const ctrl = controllerFor(device);
+    return ctrl.openUrl(device, url);
+  },
   async closeApp(deviceId, appId) {
     const device = deviceManager.ensure(deviceId);
     const ctrl = controllerFor(device);
@@ -81,6 +86,21 @@ const ActionEngine = {
     const device = deviceManager.ensure(deviceId);
     const ctrl = controllerFor(device);
     return ctrl.screenshotStream(device);
+  },
+  async executeCommand(deviceId, command) {
+    const device = deviceManager.ensure(deviceId);
+    const ctrl = controllerFor(device);
+    return ctrl.executeCommand(device, command);
+  },
+  async isAppInstalled(deviceId, bundleId) {
+    const device = deviceManager.ensure(deviceId);
+    const ctrl = controllerFor(device);
+    return ctrl.isAppInstalled(device, bundleId);
+  },
+  async installApp(deviceId, appPath) {
+    const device = deviceManager.ensure(deviceId);
+    const ctrl = controllerFor(device);
+    return ctrl.installApp(device, appPath);
   }
 }
 

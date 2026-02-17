@@ -1,100 +1,75 @@
-const axios = require('axios');
-const polyline = require('@mapbox/polyline');
 const deviceManager = require('../devices/deviceManager');
 const ActionEngine = require('../actions/actionEngine');
 
-function toCoordsTuple(value) {
-  if (Array.isArray(value) && value.length === 2) return { lat: Number(value[0]), lon: Number(value[1]) };
-  if (value && typeof value === 'object' && typeof value.lat === 'number' && typeof value.lon === 'number') return value;
-  throw Object.assign(new Error("Invalid coordinate; expected [lat, lon] or {lat, lon}"), { status: 400 });
-}
-
-function parseProxyUrl(u) {
-  if (!u) return null;
-  try {
-    const parsed = new URL(u);
-    const proxy = {
-      protocol: parsed.protocol.replace(':',''),
-      host: parsed.hostname,
-      port: parsed.port ? Number(parsed.port) : (parsed.protocol === 'https:' ? 443 : 80),
-    };
-    if (parsed.username) proxy.auth = { username: decodeURIComponent(parsed.username), password: decodeURIComponent(parsed.password || '') };
-    return proxy;
-  } catch (_) {
-    return null;
+function toLocationString(value) {
+  if (Array.isArray(value) && value.length === 2) {
+    const lat = Number(value[0]);
+    const lon = Number(value[1]);
+    if (Number.isNaN(lat) || Number.isNaN(lon)) {
+      throw Object.assign(new Error("Invalid coordinate; expected numeric [lat, lon]"), { status: 400 });
+    }
+    return `${lat},${lon}`;
   }
-}
-
-async function fetchDirections(origin, destination, apiKey, mode = 'driving', axiosProxy) {
-  const o = `${origin.lat},${origin.lon}`;
-  const d = `${destination.lat},${destination.lon}`;
-  const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${encodeURIComponent(o)}&destination=${encodeURIComponent(d)}&mode=${encodeURIComponent(mode)}&key=${encodeURIComponent(apiKey)}`;
-  const config = {};
-  if (axiosProxy) {
-    // Axios proxy config: { host, port, auth: { username, password }, protocol }
-    config.proxy = {
-      host: axiosProxy.host,
-      port: axiosProxy.port,
-      protocol: axiosProxy.protocol || 'http',
-      ...(axiosProxy.auth ? { auth: axiosProxy.auth } : {}),
-    };
+  if (value && typeof value === 'object' && typeof value.lat === 'number' && typeof value.lon === 'number') {
+    return `${value.lat},${value.lon}`;
   }
-  const { data } = await axios.get(url, config);
-  if (data.status !== 'OK') {
-    const msg = data.error_message || data.status || 'Directions API error';
-    const e = new Error(msg);
-    e.status = 400;
-    throw e;
+  if (typeof value === 'string' && value.trim()) {
+    return value.trim();
   }
-  const route = data.routes?.[0];
-  if (!route) throw Object.assign(new Error('No routes found'), { status: 404 });
-  const points = polyline.decode(route.overview_polyline.points)
-    .map(([lat, lon]) => ({ lat, lon }));
-  return { points, raw: data };
+  throw Object.assign(new Error("Invalid location; expected [lat, lon], {lat, lon}, or non-empty string"), { status: 400 });
 }
 
 module.exports = {
-  async navigate({ origin, destination, deviceId, intervalMs = 2000, openMaps = true, proxy }) {
-    const apiKey = process.env.GOOGLE_MAPS_API_KEY;
-    if (!apiKey) {
-      const e = new Error('GOOGLE_MAPS_API_KEY not set');
-      e.status = 500;
+  /**
+   * Navigate on a registered iOS simulator device by opening Google Maps.
+   * - Works only for already-registered devices (deviceId is required).
+   * - Does NOT call any external Directions API or require GOOGLE_MAPS_API_KEY.
+   * - Opens Google Maps via URL scheme (comgooglemaps://) to start turn-by-turn navigation.
+   * - Use /devices/:id/gps/set or /devices/:id/gps/route to control the simulated location.
+   */
+  async navigate({ origin, destination, deviceId, mode = 'driving', openMaps = true }) {
+    const destProvided = destination !== undefined && destination !== null;
+    if (!destProvided) {
+      const e = new Error('destination is required');
+      e.status = 400;
       throw e;
     }
-    const o = toCoordsTuple(origin);
-    const d = toCoordsTuple(destination);
 
-    // Acquire or use specified device
-    let device;
-    if (deviceId) {
-      device = deviceManager.ensure(deviceId);
-    } else {
-      device = deviceManager.acquire({ platform: 'android' });
-      if (!device) {
-        const e = new Error('No available Android devices');
-        e.status = 409;
-        throw e;
-      }
+    if (!deviceId) {
+      const e = new Error('deviceId is required and must reference a registered iOS simulator');
+      e.status = 400;
+      throw e;
     }
 
-    // Use proxy for Directions if provided (request proxy has priority, fallback to device.proxy)
-    const axiosProxy = parseProxyUrl(proxy || device.proxy);
+    // Only operate on already-registered devices
+    const device = deviceManager.ensure(deviceId);
+    if (device.platform !== 'ios') {
+      const e = new Error('Navigation API currently supports only iOS simulator devices');
+      e.status = 400;
+      throw e;
+    }
 
-    const { points } = await fetchDirections(o, d, apiKey, 'driving', axiosProxy);
+    const destQuery = toLocationString(destination);
+    const originQuery = origin ? toLocationString(origin) : 'Current Location';
 
-    // Optionally open Google Maps with navigation intent
+    // Optionally open Google Maps with navigation URL on iOS
     if (openMaps) {
-      const destQuery = `${d.lat},${d.lon}`;
-      await ActionEngine.intent(device.id, {
-        action: 'android.intent.action.VIEW',
-        data: `google.navigation:q=${encodeURIComponent(destQuery)}`,
-        component: 'com.google.android.apps.maps',
-      });
+      // Use Google Maps URL scheme on iOS. Requires Google Maps to be installed in the simulator.
+      // See: https://developers.google.com/maps/documentation/urls/ios-urlscheme
+      const params = new URLSearchParams();
+      params.set('daddr', destQuery);
+      params.set('directionsmode', mode || 'driving');
+      if (originQuery) params.set('saddr', originQuery);
+      const mapsUrl = `comgooglemaps://?${params.toString()}`;
+      await ActionEngine.openUrl(device.id, mapsUrl);
     }
 
-    // Start GPS simulation along the route
-    const task = await ActionEngine.simulateRoute(device.id, { points, intervalMs });
-
-    return { ok: true, deviceId: device.id, taskId: task.taskId, pointsCount: points.length };
+    return {
+      ok: true,
+      deviceId: device.id,
+      origin: originQuery,
+      destination: destQuery,
+      mode: mode || 'driving',
+    };
   },
 };

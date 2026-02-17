@@ -7,7 +7,7 @@ const path = require('path');
 
 const deviceService = {
     async register(payload) {
-        const {platform, proxy, meta = {}, avd} = payload || {};
+        const {platform, proxy, meta = {}, avd, createIfNotExists = false} = payload || {};
 
         if (platform !== 'ios') {
             const e = new Error("This API only supports iOS platform");
@@ -17,7 +17,7 @@ const deviceService = {
 
         // If it's an iOS device and no deviceId is provided, create a simulator
         if (!meta.deviceId) {
-            const simulatorDeviceId = await this.startIOSSimulator(avd);
+            const simulatorDeviceId = await this.startIOSSimulator(avd || 'iPhone 14', createIfNotExists);
 
             // Update meta with simulator details
             meta.simulator = {
@@ -58,14 +58,64 @@ const deviceService = {
         });
     },
 
-    async startIOSSimulator(deviceName = 'iPhone 14') {
-        // List available simulators
-        const { stdout: simulatorsList } = await this.executeCommand('xcrun', ['simctl', 'list', 'devices', 'available']);
+    async createIOSSimulator(deviceType, runtime, name) {
+        // List available device types
+        const { output: deviceTypesList } = await this.executeCommand('xcrun', ['simctl', 'list', 'devicetypes']);
         
+        // List available runtimes
+        const { output: runtimesList } = await this.executeCommand('xcrun', ['simctl', 'list', 'runtimes']);
+        
+        // Find device type ID (e.g., "iPhone 15" -> "iPhone-15")
+        const deviceTypeLines = deviceTypesList.split('\n');
+        let deviceTypeId = null;
+        for (const line of deviceTypeLines) {
+            if (line.includes(deviceType)) {
+                const match = line.match(/\(([A-Za-z0-9-]+)\)/);
+                if (match) {
+                    deviceTypeId = match[1];
+                    break;
+                }
+            }
+        }
+        
+        if (!deviceTypeId) {
+            throw new Error(`Device type '${deviceType}' not found. Available device types:\n${deviceTypesList}`);
+        }
+        
+        // Find runtime ID (e.g., "iOS 17.5" -> "com.apple.CoreSimulator.SimRuntime.iOS-17-5")
+        const runtimeLines = runtimesList.split('\n');
+        let runtimeId = null;
+        for (const line of runtimeLines) {
+            if (line.includes(runtime)) {
+                const match = line.match(/\(([A-Za-z0-9.-]+)\)/);
+                if (match) {
+                    runtimeId = match[1];
+                    break;
+                }
+            }
+        }
+        
+        if (!runtimeId) {
+            throw new Error(`Runtime '${runtime}' not found. Available runtimes:\n${runtimesList}`);
+        }
+        
+        // Create simulator: xcrun simctl create <name> <deviceTypeId> <runtimeId>
+        const { output: createOutput } = await this.executeCommand('xcrun', ['simctl', 'create', name || deviceType, deviceTypeId, runtimeId]);
+        const simulatorId = createOutput.trim();
+        
+        logger.info(`Created iOS simulator: ${name || deviceType} (${simulatorId})`);
+        return simulatorId;
+    },
+
+    async startIOSSimulator(deviceName = 'iPhone 14', createIfNotExists = false) {
+        // List available simulators
+        // executeCommand returns { output, error }, so destructure accordingly
+        const { output: simulatorsList } = await this.executeCommand('xcrun', ['simctl', 'list', 'devices', 'available']);
+        console.log(simulatorsList)
         // Parse list to find requested device
         const lines = simulatorsList.split('\n');
         let targetDeviceId = null;
-        
+
         for (const line of lines) {
             if (line.includes(deviceName) && line.includes('Booted')) {
                 // Device is already booted, extract its ID
@@ -83,13 +133,41 @@ const deviceService = {
                 }
             }
         }
-        
+
+        // If not found and createIfNotExists is true, try to create it
+        if (!targetDeviceId && createIfNotExists) {
+            try {
+                // Extract runtime from available simulators (use first iOS runtime found)
+                const runtimeLines = simulatorsList.split('\n');
+                let runtime = null;
+                for (const line of runtimeLines) {
+                    if (line.includes('iOS') && line.includes('--')) {
+                        const runtimeMatch = line.match(/--\s*(iOS\s+[\d.]+)/);
+                        if (runtimeMatch) {
+                            runtime = runtimeMatch[1];
+                            break;
+                        }
+                    }
+                }
+                
+                if (runtime) {
+                    logger.info(`Creating new simulator: ${deviceName} with runtime ${runtime}`);
+                    targetDeviceId = await this.createIOSSimulator(deviceName, runtime, deviceName);
+                } else {
+                    throw new Error('Could not determine iOS runtime for creating simulator');
+                }
+            } catch (createError) {
+                logger.error(`Failed to create simulator: ${createError.message}`);
+                throw new Error(`iOS simulator '${deviceName}' not found and creation failed: ${createError.message}`);
+            }
+        }
+
         if (!targetDeviceId) {
             throw new Error(`iOS simulator '${deviceName}' not found. Available simulators:\n${simulatorsList}`);
         }
-        
+
         // Check if simulator is already booted
-        const { stdout: bootedList } = await this.executeCommand('xcrun', ['simctl', 'list', 'devices', 'booted']);
+        const { output: bootedList } = await this.executeCommand('xcrun', ['simctl', 'list', 'devices', 'booted']);
         if (!bootedList.includes(targetDeviceId)) {
             // Boot simulator
             await this.executeCommand('xcrun', ['simctl', 'boot', targetDeviceId]);
@@ -97,8 +175,22 @@ const deviceService = {
         } else {
             logger.info(`iOS simulator ${deviceName} (${targetDeviceId}) already booted`);
         }
-        
+
         return targetDeviceId;
+    },
+
+    async installApp(deviceId, appPath) {
+        if (!deviceId) {
+            throw new Error('Device ID is required');
+        }
+        if (!appPath || typeof appPath !== 'string') {
+            throw new Error('App path is required');
+        }
+        
+        // Install app: xcrun simctl install <deviceId> <appPath>
+        await this.executeCommand('xcrun', ['simctl', 'install', deviceId, appPath]);
+        logger.info(`Installed app from ${appPath} to simulator ${deviceId}`);
+        return { ok: true };
     },
 
     list() {
@@ -201,7 +293,7 @@ const deviceService = {
 
         // Shutdown all iOS simulators
         try {
-            const { stdout: bootedSimulators } = await this.executeCommand('xcrun', ['simctl', 'list', 'devices', 'booted']);
+            const { output: bootedSimulators } = await this.executeCommand('xcrun', ['simctl', 'list', 'devices', 'booted']);
             const simulatorIds = bootedSimulators
                 .split('\n')
                 .map(line => line.trim())

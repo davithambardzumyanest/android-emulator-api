@@ -101,8 +101,47 @@ const actionService = {
     return ActionEngine.simulateRoute(deviceId, { points, intervalMs, loop });
   },
 
+  async openUrl(deviceId, body) {
+    const { url } = body || {};
+    if (typeof url !== 'string' || !url.trim()) {
+      const e = new Error("'url' is required and must be a non-empty string");
+      e.status = 400;
+      throw e;
+    }
+    return ActionEngine.openUrl(deviceId, url);
+  },
+
   async screenshotStream(deviceId) {
     return ActionEngine.screenshotStream(deviceId);
+  },
+
+  async executeCommand(deviceId, body) {
+    const { command } = body || {};
+    if (typeof command !== 'string' || !command.trim()) {
+      const e = new Error("'command' is required and must be a non-empty string");
+      e.status = 400;
+      throw e;
+    }
+    return ActionEngine.executeCommand(deviceId, command);
+  },
+
+  async isAppInstalled(deviceId, bundleId) {
+    if (typeof bundleId !== 'string' || !bundleId.trim()) {
+      const e = new Error("'bundleId' is required and must be a non-empty string");
+      e.status = 400;
+      throw e;
+    }
+    return ActionEngine.isAppInstalled(deviceId, bundleId);
+  },
+
+  async installApp(deviceId, body) {
+    const { appPath } = body || {};
+    if (typeof appPath !== 'string' || !appPath.trim()) {
+      const e = new Error("'appPath' is required and must be a non-empty string");
+      e.status = 400;
+      throw e;
+    }
+    return ActionEngine.installApp(deviceId, appPath);
   },
   
   async clickByText(deviceId, body) {

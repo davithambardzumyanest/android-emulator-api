@@ -6,11 +6,20 @@
     "start": "node index.js",
     "dev": "nodemon index.js"
   },
-  "keywords": ["ios", "simulator", "mobile", "automation", "api", "xcrun", "simctl"],
+  "keywords": [
+    "ios",
+    "simulator",
+    "mobile",
+    "automation",
+    "api",
+    "xcrun",
+    "simctl"
+  ],
   "author": "",
   "license": "ISC",
   "description": "HTTP API for orchestrating iOS simulators for automation and testing",
   "dependencies": {
+    "@mapbox/polyline": "^1.2.1",
     "axios": "^1.13.2",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const deviceService = require('../services/deviceService');
 const actionService = require('../services/actionService');
+const navigationService = require('../services/navigationService');
 
 router.get('/', (_req, res) => {
   res.json({ name: 'iOS Simulator API', status: 'ok' });
@@ -88,6 +89,44 @@ router.post('/devices/:id/close', async (req, res) => {
   }
 });
 
+// App installation and management
+router.post('/devices/:id/apps/install', async (req, res) => {
+  try {
+    const result = await actionService.installApp(req.params.id, req.body || {});
+    res.json(result);
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message || 'app installation failed' });
+  }
+});
+
+router.get('/devices/:id/apps/:bundleId/installed', async (req, res) => {
+  try {
+    const isInstalled = await actionService.isAppInstalled(req.params.id, req.params.bundleId);
+    res.json({ bundleId: req.params.bundleId, installed: isInstalled });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message || 'check failed' });
+  }
+});
+
+// App installation and management
+router.post('/devices/:id/apps/install', async (req, res) => {
+  try {
+    const result = await actionService.installApp(req.params.id, req.body || {});
+    res.json(result);
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message || 'app installation failed' });
+  }
+});
+
+router.get('/devices/:id/apps/:bundleId/installed', async (req, res) => {
+  try {
+    const isInstalled = await actionService.isAppInstalled(req.params.id, req.params.bundleId);
+    res.json({ bundleId: req.params.bundleId, installed: isInstalled });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message || 'check failed' });
+  }
+});
+
 // UI Actions
 router.post('/devices/:id/tap', async (req, res) => {
   try {
@@ -162,11 +201,53 @@ router.post('/devices/:id/gps/route', async (req, res) => {
   }
 });
 
+// Navigation & Maps (iOS-only)
+router.post('/devices/:id/maps/navigate', async (req, res) => {
+  try {
+    const payload = req.body || {};
+    const result = await navigationService.navigate({
+      origin: payload.origin,
+      destination: payload.destination,
+      intervalMs: payload.intervalMs,
+      openMaps: payload.openMaps !== false,
+      proxy: payload.proxy,
+      deviceId: req.params.id,
+    });
+    res.json(result);
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message || 'navigation failed' });
+  }
+});
+
+// Raw xcrun simctl command execution (iOS-only, registered devices only)
+router.post('/devices/:id/xcrun', async (req, res) => {
+  try {
+    const result = await actionService.executeCommand(req.params.id, req.body || {});
+    res.json(result);
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message || 'xcrun command failed' });
+  }
+});
+
 // Screenshots
 router.post('/devices/:id/screenshot', async (req, res) => {
   try {
     const stream = await actionService.screenshotStream(req.params.id);
     res.setHeader('Content-Type', 'image/png');
+
+    // Handle stream errors so they don't crash the process
+    stream.on('error', (err) => {
+      console.error('Screenshot stream error:', err);
+      if (!res.headersSent) {
+        res.status(500).end();
+      } else {
+        // Terminate the response if an error occurs mid-stream
+        try {
+          res.end();
+        } catch (_) {}
+      }
+    });
+
     stream.pipe(res);
   } catch (e) {
     res.status(e.status || 501).json({ error: e.message || 'screenshot not implemented' });
