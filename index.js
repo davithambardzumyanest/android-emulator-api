@@ -43,3 +43,12 @@ app.use((err, _req, res, _next) => {
 app.listen(PORT, () => {
   logger.info(`Unified Mobile Emulator API running on http://localhost:${PORT}`);
 });
+
+app.use((err, req, res, next) => {
+  console.error('Error:', err);
+
+  res.status(err.status || 500).json({
+    success: false,
+    message: err.message || 'Internal Server Error'
+  });
+});
