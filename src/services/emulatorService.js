@@ -405,6 +405,65 @@ class EmulatorManager {
       summary.cacheCleanup.errors.push(`Registry cleanup failed: ${e.message}`);
     }
 
+    // Phase 6: Restart API via PM2
+    try {
+      const pm2Service = process.env.PM2_APP_NAME || 'android-emulator-api';
+      logger.info(`Restarting PM2 service: ${pm2Service}`);
+      
+      const restartResult = await new Promise((resolve) => {
+        const proc = spawn('pm2', ['restart', pm2Service], { stdio: 'pipe', timeout: 10000 });
+        let stdout = '';
+        let stderr = '';
+        
+        proc.stdout.on('data', (data) => stdout += data.toString());
+        proc.stderr.on('data', (data) => stderr += data.toString());
+        
+        proc.on('close', (code) => {
+          resolve({
+            command: `pm2 restart ${pm2Service}`,
+            code,
+            stdout: stdout.trim(),
+            stderr: stderr.trim()
+          });
+        });
+        
+        proc.on('error', (err) => {
+          resolve({
+            command: `pm2 restart ${pm2Service}`,
+            code: -1,
+            stdout: '',
+            stderr: err.message
+          });
+        });
+        
+        proc.on('timeout', () => {
+          proc.kill('SIGKILL');
+          resolve({
+            command: `pm2 restart ${pm2Service}`,
+            code: -1,
+            stdout: '',
+            stderr: 'Timeout'
+          });
+        });
+      });
+      
+      summary.pm2Restart = restartResult;
+      
+      if (restartResult.code === 0) {
+        logger.info(`PM2 service ${pm2Service} restarted successfully`);
+      } else {
+        logger.error(`PM2 restart failed: ${restartResult.stderr}`);
+      }
+    } catch (e) {
+      summary.pm2Restart = {
+        command: 'pm2 restart android-emulator-api',
+        code: -1,
+        stdout: '',
+        stderr: e.message
+      };
+      logger.error(`PM2 restart failed: ${e.message}`);
+    }
+
     // Calculate total duration
     summary.duration = Date.now() - startTime;
     
