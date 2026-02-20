@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const deviceService = require('../services/deviceService');
+const emulatorService = require('../services/emulatorService');
 const actionService = require('../services/actionService');
 
 router.get('/', (_req, res) => {
@@ -10,8 +11,8 @@ router.get('/', (_req, res) => {
 // Cleanup: stop all emulators and kill lingering processes
 router.post('/cleanup', async (_req, res) => {
   try {
-    deviceService.cleanupAll();
-    res.json({ success: true });
+    const result = await emulatorService.cleanupAll();
+    res.json({ success: true, result });
   } catch (e) {
     res.status(e.status || 500).json({ success: false, error: e.message || 'cleanup failed' });
   }
