@@ -410,8 +410,9 @@ class EmulatorManager {
       const pm2Service = process.env.PM2_APP_NAME || 'android-emulator-api';
       logger.info(`Restarting PM2 service: ${pm2Service}`);
       
-      const restartResult = await new Promise((resolve) => {
-        const proc = spawn('pm2', ['restart', pm2Service], { stdio: 'pipe', timeout: 10000 });
+      // First check if PM2 is available and the service exists
+      const checkResult = await new Promise((resolve) => {
+        const proc = spawn('pm2', ['list'], { stdio: 'pipe', timeout: 5000 });
         let stdout = '';
         let stderr = '';
         
@@ -419,6 +420,60 @@ class EmulatorManager {
         proc.stderr.on('data', (data) => stderr += data.toString());
         
         proc.on('close', (code) => {
+          resolve({ code, stdout: stdout.trim(), stderr: stderr.trim() });
+        });
+        
+        proc.on('error', (err) => {
+          resolve({ code: -1, stdout: '', stderr: err.message });
+        });
+      });
+      
+      if (checkResult.code !== 0) {
+        throw new Error(`PM2 not available: ${checkResult.stderr}`);
+      }
+      
+      // Check if our service exists in PM2 list
+      if (!checkResult.stdout.includes(pm2Service)) {
+        logger.warn(`PM2 service '${pm2Service}' not found in PM2 list`);
+        logger.info(`Available PM2 services:\n${checkResult.stdout}`);
+        
+        // Try to find any android-emulator related service
+        const matchingServices = checkResult.stdout.split('\n')
+          .filter(line => line.includes('android-emulator'))
+          .map(line => line.trim().split(/\s+/)[2]) // Extract service name
+          .filter(name => name);
+        
+        if (matchingServices.length > 0) {
+          logger.info(`Found matching services: ${matchingServices.join(', ')}`);
+          pm2Service = matchingServices[0]; // Use the first match
+        }
+      }
+      
+      const restartResult = await new Promise((resolve) => {
+        logger.debug(`Executing: pm2 restart ${pm2Service}`);
+        const proc = spawn('pm2', ['restart', pm2Service], { 
+          stdio: ['pipe', 'pipe', 'pipe'], 
+          timeout: 15000,
+          env: { ...process.env, PM2_HOME: process.env.PM2_HOME || undefined }
+        });
+        
+        let stdout = '';
+        let stderr = '';
+        
+        proc.stdout.on('data', (data) => {
+          const chunk = data.toString();
+          stdout += chunk;
+          logger.debug(`PM2 stdout: ${chunk.trim()}`);
+        });
+        
+        proc.stderr.on('data', (data) => {
+          const chunk = data.toString();
+          stderr += chunk;
+          logger.debug(`PM2 stderr: ${chunk.trim()}`);
+        });
+        
+        proc.on('close', (code) => {
+          logger.debug(`PM2 restart exited with code: ${code}`);
           resolve({
             command: `pm2 restart ${pm2Service}`,
             code,
@@ -428,6 +483,7 @@ class EmulatorManager {
         });
         
         proc.on('error', (err) => {
+          logger.error(`PM2 restart process error: ${err.message}`);
           resolve({
             command: `pm2 restart ${pm2Service}`,
             code: -1,
@@ -437,12 +493,13 @@ class EmulatorManager {
         });
         
         proc.on('timeout', () => {
+          logger.error(`PM2 restart timed out after 15 seconds`);
           proc.kill('SIGKILL');
           resolve({
             command: `pm2 restart ${pm2Service}`,
             code: -1,
             stdout: '',
-            stderr: 'Timeout'
+            stderr: 'Timeout after 15 seconds'
           });
         });
       });
@@ -450,18 +507,21 @@ class EmulatorManager {
       summary.pm2Restart = restartResult;
       
       if (restartResult.code === 0) {
-        logger.info(`PM2 service ${pm2Service} restarted successfully`);
+        logger.info(`PM2 service '${pm2Service}' restarted successfully`);
+        logger.info(`PM2 output: ${restartResult.stdout}`);
       } else {
-        logger.error(`PM2 restart failed: ${restartResult.stderr}`);
+        logger.error(`PM2 restart failed with code ${restartResult.code}`);
+        logger.error(`PM2 stderr: ${restartResult.stderr}`);
+        logger.error(`PM2 stdout: ${restartResult.stdout}`);
       }
     } catch (e) {
+      logger.error(`PM2 restart exception: ${e.message}`);
       summary.pm2Restart = {
         command: 'pm2 restart android-emulator-api',
         code: -1,
         stdout: '',
         stderr: e.message
       };
-      logger.error(`PM2 restart failed: ${e.message}`);
     }
 
     // Calculate total duration
