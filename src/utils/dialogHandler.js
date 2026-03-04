@@ -49,7 +49,7 @@ async function handleSystemDialogs(serial) {
             try {
                 await android.clickByText(device, { 
                     text: buttonText,
-                    exact: true,
+                    exact: false,
                     index: 0,
                     skipDialogCheck: true
                 });

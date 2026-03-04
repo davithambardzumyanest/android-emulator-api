@@ -40,7 +40,7 @@ const ActionEngine = {
         device => controllerFor(device).tap(device, payload)
     );
   },
-  async clickByText(deviceId, {text, exact = true, index = 0}) {
+  async clickByText(deviceId, {text, exact = false, index = 0}) {
     return withDialogHandling(deviceId,
         device => controllerFor(device).clickByText(device, {text, exact, index})
     );
