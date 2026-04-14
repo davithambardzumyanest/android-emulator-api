@@ -103,7 +103,168 @@ module.exports = {
       await adb('shell settings put system accelerometer_rotation 0', { serial });
       await adb('shell settings put system user_rotation 1', { serial });
     }
-    return { ok: true };
+    return { ok: true, orientation };
+  },
+
+  async getCurrentPageInfo(device) {
+    const serial = device?.meta?.deviceId;
+    
+    if (!serial) {
+      throw new Error('Device serial not found. Make sure the device is properly registered with a valid deviceId.');
+    }
+
+    try {
+      // Method 1: Try to get current app using dumpsys window
+      let currentApp = '';
+      try {
+        const result = await adb("shell dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp'", { serial });
+        currentApp = result;
+      } catch (e) {
+        // Method 2: Fallback to dumpsys activity
+        try {
+          const result = await adb("shell dumpsys activity top | grep 'ACTIVITY'", { serial });
+          currentApp = result;
+        } catch (e2) {
+          // Method 3: Last fallback to ps
+          try {
+            const result = await adb("shell ps | grep -E 'u0_a[0-9]+' | head -1", { serial });
+            currentApp = result;
+          } catch (e3) {
+            throw new Error('Unable to determine current app');
+          }
+        }
+      }
+      
+      // Parse current app info
+      let packageName = null;
+      let activityName = null;
+      
+      // Try multiple parsing patterns
+      const appMatch = currentApp.match(/mCurrentFocus=Window{[^}]+([^}]+)}/);
+      const focusMatch = currentApp.match(/mFocusedApp=ActivityRecord{[^}]+([^}]+)}/);
+      const activityMatch = currentApp.match(/ACTIVITY\s+([^\s]+)\s+/);
+      const psMatch = currentApp.match(/([^\s]+)\s+([^\s]+)/);
+      
+      if (appMatch && appMatch[1]) {
+        const appInfo = appMatch[1].trim();
+        const parts = appInfo.split('/');
+        packageName = parts[0];
+        activityName = parts[1] || null;
+      } else if (focusMatch && focusMatch[1]) {
+        const appInfo = focusMatch[1].trim();
+        const parts = appInfo.split('/');
+        packageName = parts[0];
+        activityName = parts[1] || null;
+      } else if (activityMatch && activityMatch[1]) {
+        const appInfo = activityMatch[1].trim();
+        const parts = appInfo.split('/');
+        packageName = parts[0];
+        activityName = parts[1] || null;
+      } else if (psMatch && psMatch[1]) {
+        packageName = psMatch[1];
+        activityName = null;
+      }
+
+      // Get UI hierarchy to extract text elements and messages
+      let uiContent = {
+        textElements: [],
+        contentDescriptions: [],
+        clickableElements: [],
+        inputFields: [],
+        buttons: []
+      };
+      
+      try {
+        const deviceDumpFile = `/sdcard/ui_dump_${Date.now()}.xml`;
+        const localDumpFile = `/tmp/ui_dump_${Date.now()}.xml`;
+        
+        // Dump UI hierarchy
+        await adb(`shell uiautomator dump ${deviceDumpFile}`, { serial });
+        await adb(`pull ${deviceDumpFile} ${localDumpFile}`, { serial });
+        
+        // Read and parse UI dump
+        const fs = require('fs');
+        const xmlContent = fs.readFileSync(localDumpFile, 'utf8');
+        
+        // Extract text elements from XML
+        const textMatches = xmlContent.match(/text="([^"]*)"/g) || [];
+        const contentDescMatches = xmlContent.match(/content-desc="([^"]*)"/g) || [];
+        
+        uiContent.textElements = textMatches
+          .map(match => match.replace(/text="/, '').replace(/"$/, ''))
+          .filter(text => text && text.trim().length > 0);
+        
+        uiContent.contentDescriptions = contentDescMatches
+          .map(match => match.replace(/content-desc="/, '').replace(/"$/, ''))
+          .filter(desc => desc && desc.trim().length > 0);
+        
+        // Get clickable elements
+        const clickableMatches = xmlContent.match(/<node[^>]*clickable="true"[^>]*text="([^"]*)"[^>]*>/g) || [];
+        uiContent.clickableElements = clickableMatches.map(match => {
+          const textMatch = match.match(/text="([^"]*)"/);
+          return textMatch ? textMatch[1] : '';
+        }).filter(text => text && text.trim().length > 0);
+        
+        // Get input fields
+        const inputMatches = xmlContent.match(/<node[^>]*class="android.widget.EditText"[^>]*text="([^"]*)"[^>]*>/g) || [];
+        uiContent.inputFields = inputMatches.map(match => {
+          const textMatch = match.match(/text="([^"]*)"/);
+          return textMatch ? textMatch[1] : '';
+        });
+        
+        // Get buttons
+        const buttonMatches = xmlContent.match(/<node[^>]*class="android.widget.Button"[^>]*text="([^"]*)"[^>]*>/g) || [];
+        uiContent.buttons = buttonMatches.map(match => {
+          const textMatch = match.match(/text="([^"]*)"/);
+          return textMatch ? textMatch[1] : '';
+        }).filter(text => text && text.trim().length > 0);
+        
+        // Clean up temp files
+        await adb(`shell rm ${deviceDumpFile}`, { serial });
+        fs.unlinkSync(localDumpFile);
+        
+      } catch (dumpError) {
+        // UI dump failed, but we still have app info
+        uiContent.error = 'UI dump failed: ' + dumpError.message;
+      }
+      
+      // Get app label if possible
+      let appLabel = packageName;
+      if (packageName) {
+        try {
+          const { stdout: appInfo } = await adb(`shell pm list packages -f | grep ${packageName}`, { serial});
+          if (appInfo) {
+            const labelMatch = appInfo.match(/=([^=]+)$/);
+            if (labelMatch) {
+              appLabel = labelMatch[1];
+            }
+          }
+        } catch (e) {
+          // Ignore if we can't get app label
+        }
+      }
+      
+      return {
+        ok: true,
+        currentApp: {
+          packageName,
+          activityName,
+          appLabel
+        },
+        pageContent: {
+          textElements: [...new Set(uiContent.textElements)],
+          contentDescriptions: [...new Set(uiContent.contentDescriptions)],
+          clickableElements: [...new Set(uiContent.clickableElements)],
+          inputFields: [...new Set(uiContent.inputFields)],
+          buttons: [...new Set(uiContent.buttons)],
+          error: uiContent.error || null
+        },
+        timestamp: new Date().toISOString()
+      };
+      
+    } catch (error) {
+      throw new Error(`Failed to get current page info: ${error.message}`);
+    }
   },
 
   async setGPS(device, { lat, lon, speed = 0, bearing = 0 }) {

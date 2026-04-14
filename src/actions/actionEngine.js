@@ -85,6 +85,16 @@ const ActionEngine = {
     const ctrl = controllerFor(device);
     return ctrl.setGPS(device, payload);
   },
+  async getCurrentPageInfo(deviceId) {
+    const device = deviceManager.ensure(deviceId);
+    const ctrl = controllerFor(device);
+    if (typeof ctrl.getCurrentPageInfo !== 'function') {
+      const e = new Error('getCurrentPageInfo not supported on this platform');
+      e.status = 501;
+      throw e;
+    }
+    return ctrl.getCurrentPageInfo(device);
+  },
   async simulateRoute(deviceId, {points, intervalMs = 1500, loop = false}) {
     const device = deviceManager.ensure(deviceId);
     if (!device.tasks.route) device.tasks.route = {};

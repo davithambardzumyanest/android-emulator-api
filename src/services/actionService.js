@@ -105,6 +105,10 @@ const actionService = {
     return ActionEngine.screenshotStream(deviceId);
   },
   
+  async getCurrentPageInfo(deviceId) {
+    return ActionEngine.getCurrentPageInfo(deviceId);
+  },
+  
   async clickByText(deviceId, body) {
     const { text, exact, index } = body || {};
     if (typeof text !== 'string') {

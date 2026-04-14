@@ -26,6 +26,9 @@ module.exports = {
   async setGPS(device, coords) {
     return { ok: false, error: 'iOS control not implemented yet', status: 501 };
   },
+  async getCurrentPageInfo(device) {
+    return { ok: false, error: 'iOS control not implemented yet', status: 501 };
+  },
   async screenshotStream(device) {
     const e = new Error('iOS screenshot not implemented');
     e.status = 501;

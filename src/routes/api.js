@@ -11,8 +11,8 @@ router.get('/', (_req, res) => {
 // Cleanup: stop all emulators and kill lingering processes
 router.post('/cleanup', async (_req, res) => {
   try {
-    const result = await emulatorService.cleanupAll();
-    res.json({ success: true, result });
+    await emulatorService.cleanupAll();
+    res.json({ success: true});
   } catch (e) {
     res.status(e.status || 500).json({ success: false, error: e.message || 'cleanup failed' });
   }
@@ -155,6 +155,16 @@ router.post('/devices/:id/rotate', async (req, res) => {
     res.json(result);
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message || 'rotate failed' });
+  }
+});
+
+// Get current page information including app and UI elements
+router.get('/devices/:id/pageinfo', async (req, res) => {
+  try {
+    const result = await actionService.getCurrentPageInfo(req.params.id);
+    res.json(result);
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message || 'getCurrentPageInfo failed' });
   }
 });
 
