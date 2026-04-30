@@ -178,6 +178,7 @@ const deviceService = {
 
     async startEmulator(avdName, port, proxy) {
         const gpu = String(process.env.EMULATOR_GPU || 'auto').trim() || 'auto';
+        const headless = String(process.env.EMULATOR_HEADLESS || '').toLowerCase() === 'true';
 
         const args = [
             '-avd', avdName,
@@ -190,7 +191,7 @@ const deviceService = {
             '-no-audio',           // disable audio for headless
             '-no-boot-anim',       // skip boot animation for faster start
             '-gpu', gpu,           // configurable GPU mode: auto, host, swiftshader, etc.
-            '-memory', '4096',     // increase RAM to 8GB for stability
+            '-memory', '2048',     // increase RAM to 8GB for stability
             '-cores', '4',         // increase CPU cores if server allows
             '-netfast',            // optimize network emulation
             '-wipe-data',          // optional: ensures fresh emulator state
@@ -200,8 +201,9 @@ const deviceService = {
             '-camera-front', 'none'
         ];
 
+        logger.info(`[Emulator ${avdName}] starting with GPU mode "${gpu}" and headless=${headless}`);
+
         // Headless mode via env
-        const headless = String(process.env.EMULATOR_HEADLESS || '').toLowerCase() === 'true';
         if (headless) {
             args.push('-no-window');
         }
