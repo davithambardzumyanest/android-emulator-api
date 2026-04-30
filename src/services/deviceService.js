@@ -197,8 +197,7 @@ const deviceService = {
             // '-verbose',            // logs more info, useful for debugging
             '-read-only',           // optional if you plan multiple instances of the same AVD
             '-camera-back', 'none',
-            '-camera-front', 'none',
-            '-feature',  '-Vulkan'
+            '-camera-front', 'none'
         ];
 
         // Headless mode via env
