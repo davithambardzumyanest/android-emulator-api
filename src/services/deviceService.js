@@ -177,6 +177,8 @@ const deviceService = {
     },
 
     async startEmulator(avdName, port, proxy) {
+        const gpu = String(process.env.EMULATOR_GPU || 'auto').trim() || 'auto';
+
         const args = [
             '-avd', avdName,
             '-port', String(port),
@@ -187,11 +189,10 @@ const deviceService = {
             '-no-snapshot', '-no-snapshot-save',        // don’t use snapshots, ensures clean boot
             '-no-audio',           // disable audio for headless
             '-no-boot-anim',       // skip boot animation for faster start
-            '-gpu', 'auto', // software GPU for headless
+            '-gpu', gpu,           // configurable GPU mode: auto, host, swiftshader, etc.
             '-memory', '4096',     // increase RAM to 8GB for stability
             '-cores', '4',         // increase CPU cores if server allows
             '-netfast',            // optimize network emulation
-            '-no-window',          // run headless
             '-wipe-data',          // optional: ensures fresh emulator state
             // '-verbose',            // logs more info, useful for debugging
             '-read-only',           // optional if you plan multiple instances of the same AVD
