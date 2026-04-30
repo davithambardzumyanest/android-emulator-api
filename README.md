@@ -136,6 +136,7 @@ Below is a concise list of primary endpoints. All bodies are JSON unless noted.
 - `GOOGLE_MAPS_API_KEY`: required for Directions-based GPS routes and Maps intents in `navigationService`.
 - `EMULATOR_HEADLESS`: when `true`, starts the Android emulator with `-no-window` (headless mode). Default: `false`.
 - `EMULATOR_GPU`: Android emulator GPU mode passed to `-gpu`. Default: `auto`. Common values: `host`, `auto`, `swiftshader`, `swangle`, `software`, `lavapipe`.
+- `DISPLAY`: optional X display passed to the emulator process for host GPU rendering on servers. Example: `:99`.
 - `EMULATOR_DNS`: optional comma-separated DNS servers passed to emulator via `-dns-server`. Example: `8.8.8.8,1.1.1.1`.
 
 

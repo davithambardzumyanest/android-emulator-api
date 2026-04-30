@@ -179,6 +179,7 @@ const deviceService = {
     async startEmulator(avdName, port, proxy) {
         const gpu = String(process.env.EMULATOR_GPU || 'auto').trim() || 'auto';
         const headless = String(process.env.EMULATOR_HEADLESS || '').toLowerCase() === 'true';
+        const display = String(process.env.DISPLAY || '').trim();
 
         const args = [
             '-avd', avdName,
@@ -201,7 +202,7 @@ const deviceService = {
             '-camera-front', 'none'
         ];
 
-        logger.info(`[Emulator ${avdName}] starting with GPU mode "${gpu}" and headless=${headless}`);
+        logger.info(`[Emulator ${avdName}] starting with GPU mode "${gpu}", headless=${headless}, display=${display || 'unset'}`);
 
         // Headless mode via env
         if (headless) {
@@ -227,6 +228,7 @@ const deviceService = {
             shell: false,
             env: {
                 ...process.env,                         // keep existing env
+                ...(display ? {DISPLAY: display} : {}),
                 ANDROID_HOME: '/root/Android/Sdk',      // set correct SDK path
                 ANDROID_SDK_ROOT: '/root/Android/Sdk',
                 PATH: process.env.PATH
