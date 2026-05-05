@@ -12,8 +12,8 @@ if [[ "${EUID}" -ne 0 ]]; then
   echo "[$(date -Is)] ERROR: Please run as root (sudo)."
   exit 1
 fi
-
-APP_DIR="/var/www/android-emulator-api"
+AVD_DIR="/root/.android/avd/"
+APP_DIR="/root/android-emulator-api"
 if [[ -d "/var/www/aaron/android-emulator-api" ]]; then
   APP_DIR="/var/www/aaron/android-emulator-api"
 fi
@@ -172,6 +172,11 @@ else
       --force
   "
 fi
+
+log "Applying custom AVD config..."
+sudo -u "$API_USER" bash -c "\
+  cp '$APP_DIR/avds/config.ini' '$AVD_DIR/$AVD_NAME_DEFAULT.avd/config.ini'
+"
 
 # App installation
 if [[ ! -d "$APP_DIR" ]]; then
