@@ -207,13 +207,14 @@ const deviceService = {
 
     async startEmulator(avdName, port, proxy) {
         const gpu = String(process.env.EMULATOR_GPU || 'auto').trim() || 'auto';
+        const accel = String(process.env.EMULATOR_ACCEL || 'on').trim() || 'on';
 
         const args = [
             '-avd', avdName,
             '-port', String(port),
 
             // KVM acceleration
-            '-accel', 'on',
+            '-accel', accel,
 
             '-no-snapshot', '-no-snapshot-save',        // don’t use snapshots, ensures clean boot
             '-no-audio',           // disable audio for headless
