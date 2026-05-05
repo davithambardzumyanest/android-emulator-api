@@ -174,7 +174,7 @@ else
 fi
 
 log "Applying custom AVD config..."
-sudo -u "$API_USER" bash -c "\
+sudo -u "root" bash -c "\
   cp '$APP_DIR/avds/config.ini' '$AVD_DIR/$AVD_NAME_DEFAULT.avd/config.ini'
 "
 
