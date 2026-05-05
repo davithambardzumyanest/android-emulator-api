@@ -2,7 +2,7 @@
 set -euo pipefail
 
 AVD_NAME="${DEFAULT_AVD_NAME:-pixel3_api33_1}"
-AVD_PACKAGE="${DEFAULT_AVD_PACKAGE:-system-images;android-33;google_apis;x86_64}"
+AVD_PACKAGE="${DEFAULT_AVD_PACKAGE:-system-images;android-30;google_apis;x86_64}"
 
 mkdir -p /root/.android/avd
 touch /root/.android/repositories.cfg || true
