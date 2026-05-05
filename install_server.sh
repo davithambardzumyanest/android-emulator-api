@@ -142,7 +142,7 @@ which emulator || true
 emulator -version || true
 
 # Ensure a non-root user to run emulator and the API
-API_USER="androidapi"
+API_USER="root"
 if ! id "$API_USER" >/dev/null 2>&1; then
   log "Creating user ${API_USER}..."
   useradd -m -s /bin/bash "$API_USER"
