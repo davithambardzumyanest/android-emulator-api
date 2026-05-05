@@ -205,6 +205,16 @@ export ANDROID_SDK_ROOT=/opt/android-sdk
 export ANDROID_HOME=/opt/android-sdk
 export PATH=$ANDROID_SDK_ROOT/emulator:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH
 
+log "Creating global symlinks for adb and emulator..."
+
+ln -sf /opt/android-sdk/platform-tools/adb /usr/local/bin/adb
+ln -sf /opt/android-sdk/emulator/emulator /usr/local/bin/emulator
+
+chmod +x /opt/android-sdk/platform-tools/adb || true
+chmod +x /opt/android-sdk/emulator/emulator || true
+
+log "Symlinks created ✅"
+
 # Start with PM2
 log "Starting app with PM2 as user ${API_USER}..."
 # Use bash -lc so PATH from env file is used
