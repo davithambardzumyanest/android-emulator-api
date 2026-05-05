@@ -221,7 +221,7 @@ const deviceService = {
             '-no-boot-anim',       // skip boot animation for faster start
             '-gpu', gpu,           // configurable GPU mode: auto, host, swiftshader, etc.
             '-memory', '2056',     // increase RAM to 8GB for stability
-            '-cores', '4',         // increase CPU cores if server allows
+            '-cores', '2',         // increase CPU cores if server allows
             '-netfast',            // optimize network emulation
             '-wipe-data',          // optional: ensures fresh emulator state
             // '-verbose',            // logs more info, useful for debugging

@@ -35,13 +35,13 @@ services:
       - api_state:/app/.state
 
     # Required for fast/usable emulators (hardware acceleration)
-    devices:
-      - /dev/kvm:/dev/kvm
+#    devices:
+#      - /dev/kvm:/dev/kvm
 
     # Depending on your host, emulator may still need this:
     privileged: true
-    shm_size: "4gb"
-    cpus: 4
+    shm_size: "8gb"
+    cpus: 6
     ulimits:
       nofile:
         soft: 1048576
