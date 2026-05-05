@@ -160,12 +160,17 @@ if echo "$AVD_LIST" | grep -q "Name: ${AVD_NAME_DEFAULT}"; then
   log "AVD already exists"
 else
   log "Creating AVD ${AVD_NAME_DEFAULT}..."
-  sudo -u "$API_USER" bash -lc "\
+  sudo -u "$API_USER" bash -c "\
     set -e; \
     export ANDROID_SDK_ROOT='$ANDROID_SDK_ROOT'; \
     export ANDROID_HOME='$ANDROID_HOME'; \
-    export PATH='$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:\$PATH'; \
-    yes 'no' | avdmanager create avd -n '${AVD_NAME_DEFAULT}' -k 'system-images;android-${AVD_API_DEFAULT};${AVD_ABI_DEFAULT}' -d '${AVD_DEVICE_DEFAULT}' --force"
+    export PATH='$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'; \
+    echo 'no' | avdmanager create avd \
+      -n '${AVD_NAME_DEFAULT}' \
+      -k 'system-images;android-${AVD_API_DEFAULT};${AVD_ABI_DEFAULT}' \
+      -d '${AVD_DEVICE_DEFAULT}' \
+      --force
+  "
 fi
 
 # App installation
