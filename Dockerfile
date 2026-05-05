@@ -43,8 +43,8 @@ RUN yes | sdkmanager --licenses >/dev/null \
   && sdkmanager --install \
     "platform-tools" \
     "emulator" \
-    "platforms;android-33" \
-    "system-images;android-33;google_apis;x86_64"
+    "platforms;android-30" \
+    "system-images;android-30;google_apis;x86_64"
 
 # Ensure volumes don't hide AVDs: create at container start if missing
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
