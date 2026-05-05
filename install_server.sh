@@ -201,6 +201,10 @@ PM2_APP_NAME=$PM2_APP_NAME
 EMULATOR_HEADLESS=true
 EOF
 
+export ANDROID_SDK_ROOT=/opt/android-sdk
+export ANDROID_HOME=/opt/android-sdk
+export PATH=$ANDROID_SDK_ROOT/emulator:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH
+
 # Start with PM2
 log "Starting app with PM2 as user ${API_USER}..."
 # Use bash -lc so PATH from env file is used
