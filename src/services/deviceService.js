@@ -13,19 +13,42 @@ const wipeFlagFile = path.join(wipeFlagPath, 'wipe-once.flag');
 // Normalize proxy string for emulator flag (-http-proxy) which is more reliable with host:port
 function normalizeProxyForEmulator(p) {
     if (!p) return null;
+    const raw = String(p).trim();
+    // Accept "user:pass@host:port" by prefixing a scheme for URL parsing
+    const candidate = (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(raw) || !raw.includes('@'))
+        ? raw
+        : `http://${raw}`;
     try {
-        const u = new URL(p);
-        // If credentials or explicit scheme provided, pass through as-is (emulator supports full URL with auth)
-        if (u.username || u.password || /:^https?:$/.test(u.protocol)) {
-            return p;
-        }
+        const u = new URL(candidate);
+        // If credentials are present, keep full URL (emulator supports URL with auth)
+        if (u.username || u.password) return candidate;
+        // If explicit http(s) scheme is present, keep it as-is
+        if (u.protocol === 'http:' || u.protocol === 'https:') return candidate;
         const host = u.hostname;
         const port = u.port ? Number(u.port) : (u.protocol === 'https:' ? 443 : 80);
         return `${host}:${port}`;
     } catch (_) {
         // allow host:port format directly
-        return String(p);
+        return raw;
     }
+}
+
+function normalizeQemuCpu(raw) {
+    const v = String(raw || '').trim();
+    if (!v) return '';
+    // Accept either:
+    // - "qemu64,avx=off,f16c=off"
+    // - "qemu64,-avx,-f16c"  (normalize to feature=off form)
+    const parts = v.split(',').map((s) => s.trim()).filter(Boolean);
+    if (parts.length === 0) return '';
+
+    const base = parts[0];
+    const rest = parts.slice(1).map((p) => {
+        if (p.startsWith('-') && p.length > 1) return `${p.slice(1)}=off`;
+        return p;
+    });
+
+    return [base, ...rest].join(',');
 }
 
 function setWipeOnceFlag() {
@@ -60,7 +83,9 @@ const deviceService = {
         // If it's an Android device and no deviceId is provided, create an emulator
         if (platform === 'android' && !meta.deviceId) {
             const emulatorName = `emulator-${uuidv4().substring(0, 8)}`;
-            const port = 5555 + (Math.floor(Math.random() * 16) * 2); // Random odd port between 5555-5585
+            // Emulator console ports must be EVEN (adb is console+1).
+            // Valid defaults: 5554, 5556, ..., 5584
+            const port = 5554 + (Math.floor(Math.random() * 16) * 2);
 
             // Create AVD (Android Virtual Device)
             // await this.executeCommand('avdmanager', [
@@ -149,13 +174,17 @@ const deviceService = {
         }
 
         function parse(u) {
+            const raw = String(u).trim();
+            const candidate = (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(raw) || !raw.includes('@'))
+                ? raw
+                : `http://${raw}`;
             try {
-                const parsed = new URL(u);
+                const parsed = new URL(candidate);
                 const host = parsed.hostname;
                 const port = parsed.port ? Number(parsed.port) : (parsed.protocol === 'https:' ? 443 : 80);
                 return {host, port};
             } catch (_) {
-                const m = String(u).match(/^([^:]+):(\d+)$/);
+                const m = raw.match(/^([^:]+):(\d+)$/);
                 if (m) return {host: m[1], port: Number(m[2])};
                 const e = new Error('Invalid proxy URL');
                 e.status = 400;
@@ -190,8 +219,8 @@ const deviceService = {
             '-no-audio',           // disable audio for headless
             '-no-boot-anim',       // skip boot animation for faster start
             '-gpu', gpu,           // configurable GPU mode: auto, host, swiftshader, etc.
-            '-memory', '4096',     // increase RAM to 8GB for stability
-            '-cores', '4',         // increase CPU cores if server allows
+            '-memory', '1048',     // increase RAM to 8GB for stability
+            '-cores', '2',         // increase CPU cores if server allows
             '-netfast',            // optimize network emulation
             '-wipe-data',          // optional: ensures fresh emulator state
             // '-verbose',            // logs more info, useful for debugging
@@ -215,8 +244,8 @@ const deviceService = {
             const norm = normalizeProxyForEmulator(proxy);
             args.push('-http-proxy', norm);
             // Set public DNS to avoid corporate DNS blocking when using proxy
-            args.push('-dns-server', process.env.EMULATOR_DNS || '8.8.8.8,1.1.1.1');
-            logger.info(`[Emulator ${avdName}] using proxy ${norm} with DNS ${process.env.EMULATOR_DNS || '8.8.8.8,1.1.1.1'}`);
+            // args.push('-dns-server', process.env.EMULATOR_DNS || '8.8.8.8,1.1.1.1');
+            // logger.info(`[Emulator ${avdName}] using proxy ${norm} with DNS ${process.env.EMULATOR_DNS || '8.8.8.8,1.1.1.1'}`);
         }
 
         // Launch emulator directly with logs to console for debugging
@@ -225,12 +254,13 @@ const deviceService = {
             shell: false,
             env: {
                 ...process.env,                         // keep existing env
-                ANDROID_HOME: '/root/Android/Sdk',      // set correct SDK path
-                ANDROID_SDK_ROOT: '/root/Android/Sdk',
+                // Respect configured SDK path (Dockerfile/compose set these)
+                ANDROID_HOME: process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT || '/opt/android-sdk',
+                ANDROID_SDK_ROOT: process.env.ANDROID_SDK_ROOT || process.env.ANDROID_HOME || '/opt/android-sdk',
                 PATH: process.env.PATH
-                    + ':/root/Android/Sdk/emulator'
-                    + ':/root/Android/Sdk/platform-tools'
-                    + ':/root/Android/Sdk/tools'
+                    + `:${process.env.ANDROID_SDK_ROOT || process.env.ANDROID_HOME || '/opt/android-sdk'}/emulator`
+                    + `:${process.env.ANDROID_SDK_ROOT || process.env.ANDROID_HOME || '/opt/android-sdk'}/platform-tools`
+                    + `:${process.env.ANDROID_SDK_ROOT || process.env.ANDROID_HOME || '/opt/android-sdk'}/tools`
             }
         });
 
@@ -473,17 +503,17 @@ const deviceService = {
             summary.adbEnumeratedKills.push({serial, ...res});
         }
 
-        // Kill common QEMU processes that might remain (avoid broad -f on 'emulator' to not match our API path)
-        const killPatterns = [
-            ['pkill', ['-f', 'qemu-system-']],
-            ['pkill', ['-x', 'emulator']],
-            ['pkill', ['-x', 'emulator-headless']],
-        ];
-        for (const [cmd, args] of killPatterns) {
-            // eslint-disable-next-line no-await-in-loop
-            const res = await trySpawn(cmd, args);
-            summary.processKills.push(res);
-        }
+        // // Kill common QEMU processes that might remain (avoid broad -f on 'emulator' to not match our API path)
+        // const killPatterns = [
+        //     ['pkill', ['-f', 'qemu-system-']],
+        //     ['pkill', ['-x', 'emulator']],
+        //     ['pkill', ['-x', 'emulator-headless']],
+        // ];
+        // for (const [cmd, args] of killPatterns) {
+        //     // eslint-disable-next-line no-await-in-loop
+        //     const res = await trySpawn(cmd, args);
+        //     summary.processKills.push(res);
+        // }
 
         // // Kill adb server to release any lingering connections/ports
         // summary.adbKill = await trySpawn('adb', ['kill-server']);

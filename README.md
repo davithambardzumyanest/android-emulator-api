@@ -160,6 +160,30 @@ Below is a concise list of primary endpoints. All bodies are JSON unless noted.
 - Dev mode (nodemon): `npm run dev`
 - Logging level via `LOG_LEVEL=debug` for more verbosity.
 
+## Docker
+
+### Build & run (API only)
+This runs the HTTP API in a container. It does **not** include Android SDK tools by default.
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+Health check:
+
+```bash
+curl http://localhost:3000/
+```
+
+### Running emulators from inside Docker (optional)
+If you want `/devices/register` to start Android emulators **from inside the container**, you need:
+- Android SDK tools available at `/root/Android/Sdk` in the container (you can mount your host SDK there).
+- (Recommended) KVM access (`/dev/kvm`) and likely `privileged: true` depending on your host setup.
+- (Optional) a mount for AVDs (`~/.android`) so the emulator can find installed AVD definitions.
+
+See the commented mounts in `docker-compose.yml`.
+
 
 ## License
 MIT (or project-specific).

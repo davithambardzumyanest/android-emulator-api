@@ -1,0 +1,55 @@
+services:
+  api:
+    build: .
+    ports:
+      - "${PORT:-3000}:3000"
+    env_file:
+      - .env
+    environment:
+      # Ensure container listens on 3000 internally; host mapping controlled by PORT above.
+      - PORT=3000
+      - NODE_ENV=production
+      # Match the SDK location inside the image
+      - ANDROID_HOME=/opt/android-sdk
+      - ANDROID_SDK_ROOT=/opt/android-sdk
+      # Docker-friendly emulator defaults (override in .env if needed)
+      - EMULATOR_HEADLESS=true
+      - EMULATOR_GPU=auto
+      - EMULATOR_ACCEL=on
+      - EMULATOR_MEMORY_MB=1536
+      - EMULATOR_CORES=2
+      # Force Qt to use a headless platform backend
+      - QT_QPA_PLATFORM=offscreen
+    volumes:
+      # Only mount what changes during dev
+      - ./avds/config.ini:/root/.android/avd/pixel3_api33_1.avd/config.ini
+#      - ./avds/config.ini:/root/.android/avd/pixel3_api33_1.ini
+      - ./src:/app/src
+      - ./index.js:/app/index.js
+      - ./package.json:/app/package.json
+      - ./package-lock.json:/app/package-lock.json
+      # Let dotenv read /app/.env (env_file sets process env vars too)
+      - ./.env:/app/.env:ro
+      - api_node_modules:/app/node_modules
+      - android_home:/root/.android
+      - api_state:/app/.state
+
+    # Required for fast/usable emulators (hardware acceleration)
+    devices:
+      - /dev/kvm:/dev/kvm
+
+    # Depending on your host, emulator may still need this:
+    privileged: true
+    shm_size: "4gb"
+    cpus: 4
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+      nproc: 1048576
+
+
+volumes:
+  api_node_modules:
+  android_home:
+  api_state:

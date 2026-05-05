@@ -1,0 +1,17 @@
+node_modules
+npm-debug.log
+*.log
+
+.git
+.github
+
+.env
+
+# runtime/output artifacts
+.state
+dump.txt
+dump_.txt
+ui.xml
+
+# editor/OS
+.DS_Store
