@@ -58,7 +58,8 @@ apt-get install -y --no-install-recommends \
   libatk-bridge2.0-0 libatk1.0-0 libcups2 libdbus-1-3 libdrm2 libgbm1 libgtk-3-0 libnspr4 \
   mesa-vulkan-drivers \
   qemu-kvm \
-  socat
+  socat \
+  libxkbfile1
 
 # Ubuntu/Debian t64 transition: libasound2 may be a virtual package.
 log "Installing ALSA compatibility package..."
