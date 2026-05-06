@@ -210,22 +210,26 @@ const deviceService = {
     },
 
     async startEmulator(avdName, port, proxy) {
-        const gpu = String(process.env.EMULATOR_GPU || 'auto').trim() || 'auto';
+        const headless = String(process.env.EMULATOR_HEADLESS || '').toLowerCase() === 'true';
+        const gpuEnv = String(process.env.EMULATOR_GPU || '').trim();
+        const gpu = gpuEnv || (headless ? 'swiftshader_indirect' : 'auto');
         const accel = String(process.env.EMULATOR_ACCEL || 'on').trim() || 'on';
+        const memoryMb = String(process.env.EMULATOR_MEMORY_MB || '1536').trim() || '1536';
+        const cores = String(process.env.EMULATOR_CORES || '2').trim() || '2';
 
         const args = [
             '-avd', avdName,
             '-port', String(port),
 
             // KVM acceleration
-            '-accel', 'on',
+            '-accel', accel,
 
             '-no-snapshot', '-no-snapshot-save',        // don’t use snapshots, ensures clean boot
             '-no-audio',           // disable audio for headless
             '-no-boot-anim',       // skip boot animation for faster start
             '-gpu', gpu,           // configurable GPU mode: auto, host, swiftshader, etc.
-            '-memory', '1024',     // increase RAM to 8GB for stability
-            '-cores', '2',         // increase CPU cores if server allows
+            '-memory', memoryMb,   // configurable RAM for host stability
+            '-cores', cores,       // configurable CPU cores
             '-netfast',            // optimize network emulation
             // '-verbose',            // logs more info, useful for debugging
             '-camera-back', 'none',
@@ -235,7 +239,6 @@ const deviceService = {
         ];
 
         // Headless mode via env
-        const headless = String(process.env.EMULATOR_HEADLESS || '').toLowerCase() === 'true';
         if (headless) {
             args.push('-no-window');
         }

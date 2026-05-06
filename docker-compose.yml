@@ -14,9 +14,10 @@ services:
       - ANDROID_SDK_ROOT=/opt/android-sdk
       # Docker-friendly emulator defaults (override in .env if needed)
       - EMULATOR_HEADLESS=true
-      - EMULATOR_GPU=auto
+      - EMULATOR_GPU=swiftshader_indirect
       - EMULATOR_MEMORY_MB=1536
       - EMULATOR_CORES=2
+      - EMULATOR_ACCEL=on
       # Force Qt to use a headless platform backend
       - QT_QPA_PLATFORM=offscreen
     volumes:
