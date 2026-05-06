@@ -15,7 +15,6 @@ services:
       # Docker-friendly emulator defaults (override in .env if needed)
       - EMULATOR_HEADLESS=true
       - EMULATOR_GPU=auto
-      - EMULATOR_ACCEL=off
       - EMULATOR_MEMORY_MB=1536
       - EMULATOR_CORES=2
       # Force Qt to use a headless platform backend
@@ -35,8 +34,8 @@ services:
       - api_state:/app/.state
 
     # Required for fast/usable emulators (hardware acceleration)
-#    devices:
-#      - /dev/kvm:/dev/kvm
+    devices:
+      - /dev/kvm:/dev/kvm
 
     # Depending on your host, emulator may still need this:
     privileged: true

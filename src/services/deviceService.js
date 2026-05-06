@@ -214,20 +214,22 @@ const deviceService = {
             '-port', String(port),
 
             // KVM acceleration
-            '-accel', accel,
+            '-accel', 'on',
 
             '-no-snapshot', '-no-snapshot-save',        // don’t use snapshots, ensures clean boot
             '-no-audio',           // disable audio for headless
             '-no-boot-anim',       // skip boot animation for faster start
             '-gpu', gpu,           // configurable GPU mode: auto, host, swiftshader, etc.
-            '-memory', '4096',     // increase RAM to 8GB for stability
+            '-memory', '2048',     // increase RAM to 8GB for stability
             '-cores', '4',         // increase CPU cores if server allows
             '-netfast',            // optimize network emulation
             '-wipe-data',          // optional: ensures fresh emulator state
             // '-verbose',            // logs more info, useful for debugging
             '-read-only',           // optional if you plan multiple instances of the same AVD
             '-camera-back', 'none',
-            '-camera-front', 'none'
+            '-camera-front', 'none',
+            '-no-metrics',
+
         ];
 
         // Headless mode via env
