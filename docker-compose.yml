@@ -21,8 +21,9 @@ services:
       - QT_QPA_PLATFORM=offscreen
     volumes:
       # Only mount what changes during dev
-      - ./avds/config.ini:/root/.android/avd/pixel3_api33_1.avd/config.ini
-#      - ./avds/config.ini:/root/.android/avd/pixel3_api33_1.ini
+      # Do not bind-mount AVD internals; emulator updates these files itself.
+      # - ./avds/config.ini:/root/.android/avd/pixel3_api33_1.avd/config.ini
+      # - ./avds/config.ini:/root/.android/avd/pixel3_api33_1.ini
       - ./src:/app/src
       - ./index.js:/app/index.js
       - ./package.json:/app/package.json
