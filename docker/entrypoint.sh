@@ -11,6 +11,11 @@ if command -v avdmanager >/dev/null 2>&1; then
   if [ ! -f "/root/.android/avd/${AVD_NAME}.ini" ]; then
     echo "[entrypoint] AVD '${AVD_NAME}' missing; creating..."
     echo "no" | avdmanager create avd -n "${AVD_NAME}" -k "${AVD_PACKAGE}" --force >/dev/null
+
+    # Apply optional template only at creation time (avoid modifying live AVD files).
+    if [ -f "/opt/avd-config-template.ini" ]; then
+      cp /opt/avd-config-template.ini "/root/.android/avd/${AVD_NAME}.avd/config.ini"
+    fi
   fi
 fi
 

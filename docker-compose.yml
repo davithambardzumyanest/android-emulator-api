@@ -39,8 +39,6 @@ services:
 
     # Depending on your host, emulator may still need this:
     privileged: true
-    shm_size: "8gb"
-    cpus: 6
     ulimits:
       nofile:
         soft: 1048576

@@ -50,7 +50,8 @@ RUN yes | sdkmanager --licenses >/dev/null \
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-COPY avds/config.ini ~/.android/avd/pixel3_api33_1.avd/config.ini
+# Keep AVD config template outside live AVD directories.
+COPY avds/config.ini /opt/avd-config-template.ini
 
 # Install dependencies first for better layer caching
 COPY package.json package-lock.json ./

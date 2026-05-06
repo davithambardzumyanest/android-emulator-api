@@ -10,6 +10,10 @@ const { handleSystemDialogs } = require('../utils/dialogHandler');
 const wipeFlagPath = path.join(__dirname, '../../.state');
 const wipeFlagFile = path.join(wipeFlagPath, 'wipe-once.flag');
 
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // Normalize proxy string for emulator flag (-http-proxy) which is more reliable with host:port
 function normalizeProxyForEmulator(p) {
     if (!p) return null;
@@ -223,9 +227,7 @@ const deviceService = {
             '-memory', '2048',     // increase RAM to 8GB for stability
             '-cores', '4',         // increase CPU cores if server allows
             '-netfast',            // optimize network emulation
-            '-wipe-data',          // optional: ensures fresh emulator state
             // '-verbose',            // logs more info, useful for debugging
-            '-read-only',           // optional if you plan multiple instances of the same AVD
             '-camera-back', 'none',
             '-camera-front', 'none',
             '-no-metrics',
@@ -239,8 +241,16 @@ const deviceService = {
         }
 
         // If cleanup requested a fresh device, wipe data on next boot
-        if (consumeWipeOnceFlag()) {
+        const shouldWipeData = consumeWipeOnceFlag();
+        if (shouldWipeData) {
             args.push('-wipe-data');
+        }
+
+        const readOnly = String(process.env.EMULATOR_READ_ONLY || '').toLowerCase() === 'true';
+        if (readOnly && !shouldWipeData) {
+            args.push('-read-only');
+        } else if (readOnly && shouldWipeData) {
+            logger.warn('Skipping -read-only because -wipe-data is active for this boot');
         }
 
         if (proxy) {
@@ -277,6 +287,42 @@ const deviceService = {
         });
 
         return emulatorProcess;
+    },
+
+    async waitForAdbDevice(serial, timeoutMs = 120000) {
+        const start = Date.now();
+
+        // Best-effort daemon startup; ignore failures and rely on retries below.
+        await new Promise((resolve) => {
+            const proc = spawn('adb', ['start-server'], {stdio: 'ignore'});
+            proc.on('close', () => resolve());
+            proc.on('error', () => resolve());
+        });
+
+        while (Date.now() - start < timeoutMs) {
+            const state = await new Promise((resolve) => {
+                const proc = spawn('adb', ['-s', serial, 'get-state'], {stdio: ['ignore', 'pipe', 'pipe']});
+                let stdout = '';
+                proc.stdout.on('data', (d) => {
+                    stdout += d.toString();
+                });
+                proc.on('close', (code) => {
+                    if (code === 0 && stdout.trim() === 'device') {
+                        resolve(true);
+                    } else {
+                        resolve(false);
+                    }
+                });
+                proc.on('error', () => resolve(false));
+            });
+
+            if (state) return true;
+            await sleep(1000);
+        }
+
+        const err = new Error(`Timed out waiting for emulator ${serial} to become ready`);
+        err.status = 504;
+        throw err;
     },
 
     list() {
@@ -343,6 +389,7 @@ const deviceService = {
             e.status = 400;
             throw e;
         }
+        await this.waitForAdbDevice(serial);
         await handleSystemDialogs(serial)
         const args = ['-s', serial, ...parts];
         logger.debug(`Executing: adb ${args.join(' ')}`);
