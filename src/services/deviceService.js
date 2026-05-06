@@ -224,8 +224,8 @@ const deviceService = {
             '-no-audio',           // disable audio for headless
             '-no-boot-anim',       // skip boot animation for faster start
             '-gpu', gpu,           // configurable GPU mode: auto, host, swiftshader, etc.
-            '-memory', '2048',     // increase RAM to 8GB for stability
-            '-cores', '4',         // increase CPU cores if server allows
+            '-memory', '1024',     // increase RAM to 8GB for stability
+            '-cores', '2',         // increase CPU cores if server allows
             '-netfast',            // optimize network emulation
             // '-verbose',            // logs more info, useful for debugging
             '-camera-back', 'none',
