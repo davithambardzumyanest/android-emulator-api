@@ -158,10 +158,12 @@ partial level and discharging rather than pinned to 100% on AC, a real device
 name, timezone, screen timeout, location enabled, setup marked complete, and
 animations left on (set `DEVICE_DISABLE_ANIMATIONS=true` to trade that for speed).
 
-**Build identity is a known limitation.** Profile props are passed with `-prop`,
-but the emulator's system image fixes `ro.product.*` as read-only, so
-`Build.MODEL` still reports `sdk_gphone64_x86_64` — verified on this setup.
-Changing it for real requires a writable `/system`:
+**Build identity is a known limitation.** `Build.MODEL` still reports
+`sdk_gphone64_x86_64`. The emulator's `-prop` flag cannot change it — emulator
+36.x rejects anything outside `qemu.*` ("unexpected '-prop' value
+(ro.product.model=...), only 'qemu.*' properties are supported"), and the props
+are baked read-only into the system image. Each profile still carries the real
+build strings, but applying them requires a writable `/system`:
 
 ```bash
 DEVICE_WRITABLE_SYSTEM=true   # boot with -writable-system

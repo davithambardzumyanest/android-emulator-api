@@ -161,11 +161,11 @@ class EmulatorService {
     // first boot, so opt in only when build identity actually matters.
     if (config.device.writableSystem) args.push('-writable-system');
 
-    // Best-effort identity hints. These reach the guest as boot properties and
-    // take effect for props the image has not already fixed as read-only.
-    for (const [key, value] of Object.entries(avdConfig.bootProps(profileName))) {
-      args.push('-prop', `${key}=${value}`);
-    }
+    // Build identity (ro.product.*) is deliberately NOT passed via -prop:
+    // emulator 36.x rejects it outright — "unexpected '-prop' value
+    // (ro.product.model=...), only 'qemu.*' properties are supported" — so it
+    // only produced warnings. Changing the build identity needs a writable
+    // /system and a build.prop patch; see "Device realism" in the README.
 
     return args;
   }
