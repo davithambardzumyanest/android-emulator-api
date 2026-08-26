@@ -105,18 +105,25 @@ const server = app.listen(config.port, () => {
 server.headersTimeout = 120000;
 server.requestTimeout = 0;
 
-/** Stop emulators before exiting so a restart does not leak qemu processes. */
+/**
+ * Shut down cleanly.
+ * Emulators are left running by default: they are spawned detached, so a deploy
+ * or `pm2 restart` does not end live sessions, and they can be re-adopted by
+ * registering with `meta.deviceId`. Set CLEANUP_ON_EXIT=true to stop them.
+ */
 let shuttingDown = false;
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
-  logger.info({ signal }, 'shutting down');
+  logger.info({ signal, cleanupOnExit: config.runtime.cleanupOnExit }, 'shutting down');
 
   server.close();
-  try {
-    await deviceService.cleanupAll({ wipeNextStart: false });
-  } catch (e) {
-    logger.error({ err: e.message }, 'cleanup during shutdown failed');
+  if (config.runtime.cleanupOnExit) {
+    try {
+      await deviceService.cleanupAll({ wipeNextStart: false });
+    } catch (e) {
+      logger.error({ err: e.message }, 'cleanup during shutdown failed');
+    }
   }
   process.exit(0);
 }

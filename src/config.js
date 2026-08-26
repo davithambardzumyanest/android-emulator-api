@@ -117,6 +117,13 @@ const config = {
     // /devices/:id/adb runs arbitrary adb subcommands; off by default.
     allowRawAdb: bool(process.env.ALLOW_RAW_ADB, false),
   },
+
+  runtime: {
+    // Stop emulators when the API exits. Off by default: emulators are spawned
+    // detached, so a deploy or `pm2 restart` does not end live sessions and they
+    // can be re-adopted by registering with `meta.deviceId`.
+    cleanupOnExit: bool(process.env.CLEANUP_ON_EXIT, false),
+  },
 };
 
 // PATH used for every spawned SDK binary.
