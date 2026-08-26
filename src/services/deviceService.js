@@ -54,6 +54,16 @@ const deviceService = {
     }
 
     if (platform === 'android' && meta.deviceId) {
+      // Adopting an existing emulator: make sure it is actually there. Without
+      // this the registration succeeds and every later call fails with a
+      // confusing "device not found" from adb.
+      const live = await listEmulators().catch(() => []);
+      if (!live.includes(meta.deviceId)) {
+        const e = new Error(`Emulator '${meta.deviceId}' is not running. Attached: ${live.join(', ') || 'none'}`);
+        e.status = 404;
+        throw e;
+      }
+
       // Reflect what the guest actually reports, so callers can verify the
       // device presents itself the way the profile intended.
       meta.identity = await this.identity(meta.deviceId).catch(() => null);

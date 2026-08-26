@@ -12,7 +12,7 @@ const logger = require('../logger');
 const profiles = require('../devices/profiles');
 const avdConfig = require('../devices/avdConfig');
 const portAllocator = require('../utils/portAllocator');
-const { adb, adbText, shell, getProp, listEmulators } = require('../utils/adb');
+const { run, adb, adbText, shell, getProp, listEmulators } = require('../utils/adb');
 const { suppressDialogs } = require('../utils/dialogHandler');
 
 const stateDir = path.join(__dirname, '../../.state');
@@ -72,6 +72,21 @@ function normalizeProxy(value) {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Find the pid of the emulator serving a console port.
+ * Needed because `setsid --fork` hides the real pid from spawn().
+ */
+async function findEmulatorPid(port) {
+  try {
+    const { stdout } = await run('pgrep', ['-f', `-port ${port}`], { timeoutMs: 5000 });
+    const pids = stdout.toString().split(/\s+/).map(Number).filter(Number.isFinite);
+    // The qemu process is the longest-lived match; take the lowest pid.
+    return pids.length ? Math.min(...pids) : null;
+  } catch (_) {
+    return null;
+  }
+}
 
 /**
  * RAM to give the guest.
@@ -230,11 +245,23 @@ class EmulatorService {
     const logPath = path.join(logDir, `${serial}.log`);
     const logFd = fs.openSync(logPath, 'a');
 
-    const proc = spawn('emulator', args, {
-      detached: true,
-      stdio: ['ignore', logFd, logFd],
-      env: config.android.env,
-    });
+    // `setsid --fork` double-forks: the intermediate exits at once and the
+    // emulator is reparented to init, so it is no longer a descendant of this
+    // process. That matters because PM2 tree-kills the whole process tree on
+    // restart — `detached: true` alone is not enough, and emulators were being
+    // killed by every deploy despite running detached.
+    const useSetsid = process.platform === 'linux' && fs.existsSync('/usr/bin/setsid');
+    const proc = useSetsid
+      ? spawn('/usr/bin/setsid', ['--fork', 'emulator', ...args], {
+        detached: true,
+        stdio: ['ignore', logFd, logFd],
+        env: config.android.env,
+      })
+      : spawn('emulator', args, {
+        detached: true,
+        stdio: ['ignore', logFd, logFd],
+        env: config.android.env,
+      });
 
     // The child owns the descriptor now.
     try { fs.closeSync(logFd); } catch (_) { /* already closed */ }
@@ -243,6 +270,13 @@ class EmulatorService {
 
     let exited = false;
     proc.on('close', (code) => {
+      // Under setsid this fires as soon as the intermediate forks, which is
+      // normal and says nothing about the emulator. Liveness is tracked by
+      // polling adb in waitForBoot instead.
+      if (useSetsid) {
+        logger.debug({ serial, code }, 'setsid helper exited (emulator continues)');
+        return;
+      }
       exited = true;
       logger.info({ serial, code }, 'emulator process exited');
       this.processes.delete(serial);
@@ -250,7 +284,7 @@ class EmulatorService {
     });
 
     proc.unref();
-    this.processes.set(serial, { process: proc, avd, port, startedAt });
+    this.processes.set(serial, { process: proc, avd, port, startedAt, pid: null });
 
     try {
       await this.waitForBoot(serial, () => exited);
@@ -267,12 +301,25 @@ class EmulatorService {
     }
 
     const bootMs = Date.now() - startedAt;
-    logger.info({ serial, bootMs }, 'emulator booted');
+    const emulatorPid = await findEmulatorPid(port);
+    if (emulatorPid) {
+      const entry = this.processes.get(serial);
+      if (entry) entry.pid = emulatorPid;
+    }
+    logger.info({ serial, bootMs, pid: emulatorPid }, 'emulator booted');
 
     await this.configureDevice(serial, profileName);
     portAllocator.release(port); // now tracked via `adb devices`
 
-    return { serial, port, pid: proc.pid, avd, bootMs, profile: profileResult, command: `emulator ${args.join(' ')}` };
+    return {
+      serial,
+      port,
+      pid: emulatorPid || proc.pid,
+      avd,
+      bootMs,
+      profile: profileResult,
+      command: `emulator ${args.join(' ')}`,
+    };
   }
 
   /**
@@ -423,14 +470,26 @@ class EmulatorService {
       await sleep(500);
     }
 
-    if (entry?.process?.pid) {
+    // Fall back to killing the process if the console kill did not take. Use
+    // the emulator's own pid (discovered after boot), not the setsid helper's.
+    const port = entry?.port ?? Number(serial.split('-')[1]);
+    const pid = entry?.pid || (Number.isFinite(port) ? await findEmulatorPid(port) : null);
+
+    if (pid && (await listEmulators()).includes(serial)) {
       try {
-        // Negative pid: the emulator was spawned detached, so kill the whole
-        // group — killing only the launcher orphans the qemu child.
-        process.kill(-entry.process.pid, 'SIGKILL');
+        // Negative pid kills the whole group: the emulator launcher execs qemu,
+        // so signalling one alone can orphan the other.
+        process.kill(-pid, 'SIGKILL');
       } catch (e) {
-        if (e.code !== 'ESRCH') errors.push(`kill group: ${e.message}`);
+        if (e.code !== 'ESRCH') {
+          try { process.kill(pid, 'SIGKILL'); } catch (e2) {
+            if (e2.code !== 'ESRCH') errors.push(`kill ${pid}: ${e2.message}`);
+          }
+        }
       }
+    }
+
+    if (entry) {
       this.processes.delete(serial);
       portAllocator.release(entry.port);
     }
