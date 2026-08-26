@@ -138,4 +138,28 @@ async function listEmulators() {
     .map((line) => line.split(/\s+/)[0]);
 }
 
-module.exports = { run, adb, adbText, adbBuffer, shell, shellQuote, getProp, listEmulators, enqueue };
+/**
+ * Make sure the screen is on and unlocked.
+ *
+ * A sleeping screen makes `uiautomator dump` return "null root node returned by
+ * UiTestAutomationBridge", which surfaces as every UI query failing. Waking is
+ * cheap, so it is worth doing whenever a dump fails.
+ *
+ * @returns {Promise<boolean>} true if the device had to be woken
+ */
+async function ensureAwake(serial) {
+  const power = await shell(serial, ['dumpsys', 'power'], { check: false, timeoutMs: 10000 })
+    .catch(() => '');
+
+  // Awake / Dreaming / Dozing / Asleep
+  if (/mWakefulness=Awake/.test(power)) return false;
+
+  logger.info({ serial }, 'device screen was off, waking it');
+  await shell(serial, ['input', 'keyevent', 'KEYCODE_WAKEUP'], { check: false });
+  await shell(serial, ['wm', 'dismiss-keyguard'], { check: false });
+  return true;
+}
+
+module.exports = {
+  run, adb, adbText, adbBuffer, shell, shellQuote, getProp, listEmulators, enqueue, ensureAwake,
+};

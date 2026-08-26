@@ -353,7 +353,13 @@ class EmulatorService {
     }
 
     // Keep the screen on and unlocked so screenshots and taps land.
+    // Note stay_on_while_plugged_in only holds while the device is charging,
+    // and the realism settings below deliberately unplug it — so the screen
+    // timeout is what actually keeps the device awake. Without a long timeout
+    // the screen sleeps and every uiautomator dump fails with "null root node".
     await put('global', 'stay_on_while_plugged_in', 7);
+    await put('system', 'screen_off_timeout', config.device.screenOffTimeoutMs);
+    await run('wake', ['input', 'keyevent', 'KEYCODE_WAKEUP']);
     await run('dismiss keyguard', ['wm', 'dismiss-keyguard']);
 
     // The "Swipe up to exit full screen" overlay takes window focus and makes
@@ -373,7 +379,6 @@ class EmulatorService {
     }
 
     await run('timezone', ['setprop', 'persist.sys.timezone', config.device.timezone]);
-    await put('system', 'screen_off_timeout', 120000);
     await put('system', 'screen_brightness_mode', 1);
     await put('secure', 'location_mode', 3);
     // A freshly-flashed device has setup completed; leaving these at 0 leaves

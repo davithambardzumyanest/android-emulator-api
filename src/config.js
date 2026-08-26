@@ -97,6 +97,9 @@ const config = {
     locale: process.env.DEVICE_LOCALE || 'en-US',
     timezone: process.env.DEVICE_TIMEZONE || 'America/New_York',
     batteryLevel: int(process.env.DEVICE_BATTERY_LEVEL, 87),
+    // The device must not fall asleep: a dark screen breaks every UI query.
+    // 24h by default; lower it only if you want the device to sleep.
+    screenOffTimeoutMs: int(process.env.DEVICE_SCREEN_OFF_TIMEOUT_MS, 86400000),
     // Realistic devices animate. Turn on only when you need raw automation speed.
     disableAnimations: bool(process.env.DEVICE_DISABLE_ANIMATIONS, false),
     // Rewrite AVD config.ini from the profile before each boot.

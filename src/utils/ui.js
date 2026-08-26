@@ -5,7 +5,7 @@
 // `exec-out uiautomator dump /dev/tty` streams the XML straight back in one.
 // Results are cached briefly so a dialog check and a click can share a dump.
 const { XMLParser } = require('fast-xml-parser');
-const { adbBuffer, shell } = require('./adb');
+const { adbBuffer, shell, ensureAwake } = require('./adb');
 const config = require('../config');
 const logger = require('../logger');
 
@@ -84,8 +84,17 @@ async function dumpXml(serial, { fresh = false, retries = 2 } = {}) {
     }
     reason = result.reason || reason;
     logger.debug({ serial, attempt: attempt + 1, reason }, 'UI dump retry');
-    // eslint-disable-next-line no-await-in-loop
-    if (attempt < retries) await sleep(400 * (attempt + 1));
+
+    if (attempt < retries) {
+      // "null root node" almost always means the screen is off. Wake it rather
+      // than burning the remaining attempts on the same failure.
+      if (/null root node|could not get idle state/i.test(reason)) {
+        // eslint-disable-next-line no-await-in-loop
+        await ensureAwake(serial).catch(() => {});
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(400 * (attempt + 1));
+    }
   }
 
   const e = new Error(`Could not read UI hierarchy: ${reason}`);
