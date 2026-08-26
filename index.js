@@ -99,6 +99,11 @@ app.use((err, req, res, _next) => {
 
 const server = app.listen(config.port, () => {
   logger.info(`Unified Mobile Emulator API listening on http://localhost:${config.port}`);
+
+  // Adopt devices from before a restart, keeping their ids stable for clients.
+  deviceService.restoreRegistry()
+    .then(({ restored, dropped }) => logger.info({ restored, dropped }, 'registry ready'))
+    .catch((e) => logger.warn({ err: e.message }, 'registry restore failed'));
 });
 
 // Keep long screenshot streams from being cut by the default 5s header timeout.

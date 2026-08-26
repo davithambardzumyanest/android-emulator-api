@@ -17,6 +17,22 @@ const { suppressDialogs } = require('../utils/dialogHandler');
 
 const stateDir = path.join(__dirname, '../../.state');
 const wipeFlagFile = path.join(stateDir, 'wipe-once.flag');
+const logDir = path.join(stateDir, 'emulator-logs');
+
+/** Last few meaningful lines of an emulator log, for error messages. */
+function readLogTail(logPath, lines = 4) {
+  try {
+    return fs.readFileSync(logPath, 'utf8')
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l && !/^(INFO|libunwind)/.test(l))
+      .slice(-lines)
+      .join(' | ')
+      .slice(0, 500);
+  } catch (_) {
+    return '';
+  }
+}
 
 function setWipeOnceFlag() {
   try {
@@ -206,22 +222,23 @@ class EmulatorService {
     logger.info({ avd, serial, wipe: shouldWipe, profile: profileName }, 'starting emulator');
     const startedAt = Date.now();
 
-    // detached + unref so an API restart does not take the emulator with it.
-    // stdio is piped rather than inherited: 'inherit' meant emulator output
-    // filled the API's own log pipe and could block the process.
+    // Emulator output goes to a file, not to a pipe held by this process.
+    // With piped stdio a detached emulator still dies when the API restarts:
+    // the pipe breaks and the next write kills it (observed as a clean exit 0
+    // moments after a `pm2 restart`). A file descriptor has no such tie.
+    fs.mkdirSync(logDir, { recursive: true });
+    const logPath = path.join(logDir, `${serial}.log`);
+    const logFd = fs.openSync(logPath, 'a');
+
     const proc = spawn('emulator', args, {
       detached: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', logFd, logFd],
       env: config.android.env,
     });
 
-    let earlyError = '';
-    proc.stdout.on('data', (d) => logger.debug({ serial }, d.toString().trim()));
-    proc.stderr.on('data', (d) => {
-      const text = d.toString().trim();
-      earlyError += `${text}\n`;
-      logger.warn({ serial }, text);
-    });
+    // The child owns the descriptor now.
+    try { fs.closeSync(logFd); } catch (_) { /* already closed */ }
+
     proc.on('error', (err) => logger.error({ serial, err: err.message }, 'emulator spawn failed'));
 
     let exited = false;
@@ -244,7 +261,8 @@ class EmulatorService {
       // the port — an orphan that survives the failed registration.
       try { process.kill(-proc.pid, 'SIGKILL'); } catch (_) { /* already gone */ }
       try { proc.kill('SIGKILL'); } catch (_) { /* already gone */ }
-      e.message = `${e.message}${earlyError ? ` (emulator said: ${earlyError.trim().split('\n').slice(-3).join(' | ')})` : ''}`;
+      const tail = readLogTail(logPath);
+      e.message = `${e.message}${tail ? ` (emulator log: ${tail})` : ''}`;
       throw e;
     }
 

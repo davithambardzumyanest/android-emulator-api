@@ -183,3 +183,5 @@ yarn-error.log*
 *.njsproj
 *.sln
 *.sw?
+# Runtime state (device registry, emulator logs, wipe flag)
+.state/

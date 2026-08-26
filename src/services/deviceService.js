@@ -216,6 +216,16 @@ const deviceService = {
     return listEmulators();
   },
 
+  /**
+   * Re-adopt devices registered before a restart.
+   * Emulators outlive the API, so their registrations should too — otherwise a
+   * deploy leaves clients holding device ids that 404.
+   */
+  async restoreRegistry() {
+    const live = await listEmulators().catch(() => []);
+    return deviceManager.restore(live);
+  },
+
   /** Stop every emulator and clear the registry. */
   async cleanupAll(options) {
     const summary = await emulatorService.cleanupAll(options);
