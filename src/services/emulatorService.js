@@ -1,574 +1,455 @@
+// Emulator lifecycle: start, wait for boot, configure realistically, stop.
+//
+// This replaces two overlapping implementations that disagreed about metadata
+// keys and both had destructive cleanup paths. See CHANGES.md for details.
 const { spawn } = require('child_process');
-const { v4: uuidv4 } = require('uuid');
-const deviceManager = require('../devices/deviceManager');
-const logger = require('../logger');
+const os = require('os');
 const fs = require('fs');
 const path = require('path');
 
-class EmulatorManager {
+const config = require('../config');
+const logger = require('../logger');
+const profiles = require('../devices/profiles');
+const avdConfig = require('../devices/avdConfig');
+const portAllocator = require('../utils/portAllocator');
+const { adb, adbText, shell, getProp, listEmulators } = require('../utils/adb');
+const { suppressDialogs } = require('../utils/dialogHandler');
+
+const stateDir = path.join(__dirname, '../../.state');
+const wipeFlagFile = path.join(stateDir, 'wipe-once.flag');
+
+function setWipeOnceFlag() {
+  try {
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(wipeFlagFile, String(Date.now()));
+    return true;
+  } catch (e) {
+    logger.warn({ err: e.message }, 'could not arm wipe-once flag');
+    return false;
+  }
+}
+
+function consumeWipeOnceFlag() {
+  try {
+    if (fs.existsSync(wipeFlagFile)) {
+      fs.unlinkSync(wipeFlagFile);
+      return true;
+    }
+  } catch (e) {
+    logger.warn({ err: e.message }, 'could not consume wipe-once flag');
+  }
+  return false;
+}
+
+/** Normalise a proxy for the emulator's `-http-proxy` flag. */
+function normalizeProxy(value) {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    // Credentials must be passed through as a full URL.
+    if (url.username || url.password) return value;
+    const port = url.port || (url.protocol === 'https:' ? '443' : '80');
+    return `${url.hostname}:${port}`;
+  } catch (_) {
+    return String(value);
+  }
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * RAM to give the guest.
+ * Follows the device profile so the guest reports the phone's real RAM, but
+ * never promises more than the host can actually back — an over-committed
+ * -memory makes the emulator fail to start rather than run slowly.
+ */
+function resolveMemoryMb(profileName) {
+  if (config.emulator.memoryMb) return config.emulator.memoryMb;
+
+  const profile = profiles.get(profileName);
+  const wanted = profile?.ramMb || 4096;
+
+  // os.freemem() ignores reclaimable page cache and badly understates what is
+  // usable, so prefer MemAvailable where the kernel reports it.
+  let availableMb = Math.floor(os.freemem() / (1024 * 1024));
+  try {
+    const meminfo = fs.readFileSync('/proc/meminfo', 'utf8');
+    const match = /^MemAvailable:\s+(\d+) kB$/m.exec(meminfo);
+    if (match) availableMb = Math.floor(Number(match[1]) / 1024);
+  } catch (_) { /* not Linux, or /proc unavailable */ }
+
+  // Leave 2 GB for the host and this API, and round to a 256 MB boundary.
+  const safeMb = Math.floor(Math.max(2048, availableMb - 2048) / 256) * 256;
+  const granted = Math.min(wanted, safeMb);
+
+  if (granted < wanted) {
+    logger.warn({ profile: profileName, wanted, granted, availableMb }, 'capping emulator RAM to fit host memory');
+  }
+  return granted;
+}
+
+class EmulatorService {
   constructor() {
+    /** serial -> { process, avd, port, startedAt } */
     this.processes = new Map();
   }
 
-  async startEmulator({
-    avd,
-    port = 5554,
-    proxy,
-    noSnapshot = true,
-    noAudio = true,
-    noBootAnim = true,
-    gpu = 'swiftshader_indirect',
-    memory = 4096,
-    cores = 4,
-  }) {
-    try {
-      const serial = `emulator-${port}`;
-      logger.info(`Starting emulator ${avd} on port ${port}...`);
-
-      // Build command arguments
-      const args = [
-        '-avd', avd,
-        '-port', String(port),
-        ...(noSnapshot ? ['-no-snapshot'] : []),
-        ...(noAudio ? ['-no-audio'] : []),
-        ...(noBootAnim ? ['-no-boot-anim'] : []),
-        '-gpu', gpu,
-        '-memory', String(memory),
-        '-cores', String(cores),
-        '-netfast'
-      ];
-
-      if (proxy) {
-        args.push('-http-proxy', proxy);
-        logger.info(`Using proxy: ${proxy}`);
-      }
-
-      // Log the full command for debugging
-      const command = `emulator ${args.join(' ')} &`;
-      logger.debug(`Executing: ${command}`);
-
-      // Start emulator process
-      const emulatorProcess = spawn('emulator', args, {
-        detached: true,
-        stdio: ['ignore', 'pipe', 'pipe']
-      });
-
-      // Log emulator output
-      emulatorProcess.stdout.on('data', (data) => {
-        logger.debug(`[Emulator ${avd}]: ${data.toString().trim()}`);
-      });
-
-      emulatorProcess.stderr.on('data', (data) => {
-        logger.error(`[Emulator ${avd} Error]: ${data.toString().trim()}`);
-      });
-
-      emulatorProcess.on('close', (code) => {
-        const msg = `Emulator ${avd} (${serial}) process exited with code ${code}`;
-        if (code === 0) {
-          logger.info(msg);
-        } else {
-          logger.error(msg);
-        }
-        this.processes.delete(serial);
-      });
-
-      // Store process reference
-      this.processes.set(serial, emulatorProcess);
-
-      // Wait for device to be ready
-      await this.waitForBoot(serial);
-      logger.info(`Emulator ${avd} (${serial}) is ready`);
-
-      // Configure device
-      await this.configureDevice(serial);
-
-      // Register device
-      const device = deviceManager.register({
-        platform: 'android',
-        proxy,
-        meta: {
-          serial,
-          avd,
-          port,
-          pid: emulatorProcess.pid
-        }
-      });
-
-      return { success: true, device };
-    } catch (error) {
-      logger.error(`Failed to start emulator: ${error.message}`);
-      throw error;
-    }
-  }
-
-  async waitForBoot(serial, timeout = 120000) {
-    const start = Date.now();
-    logger.debug(`Waiting for ${serial} to boot...`);
-
-    while (Date.now() - start < timeout) {
-      try {
-        const booted = await this.executeAdbCommand(serial, 'getprop sys.boot_completed');
-        if (booted.trim() === '1') {
-          return true;
-        }
-      } catch (e) {
-        // Ignore errors while waiting for boot
-      }
-      await new Promise(resolve => setTimeout(resolve, 2000));
-    }
-    throw new Error(`Timeout waiting for ${serial} to boot`);
-  }
-
-  async configureDevice(serial) {
-    try {
-      logger.debug(`Configuring device ${serial}...`);
-      
-      // Enable location services
-      await this.executeAdbCommand(serial, 'settings put secure location_mode 3');
-      
-      // Grant necessary permissions to Maps
-      await this.executeAdbCommand(
-        serial,
-        'pm grant com.google.android.apps.maps android.permission.ACCESS_FINE_LOCATION'
-      );
-      
-      logger.debug(`Device ${serial} configured successfully`);
-    } catch (error) {
-      logger.error(`Failed to configure device ${serial}: ${error.message}`);
-      throw error;
-    }
-  }
-
-  async executeAdbCommand(serial, command) {
-    return new Promise((resolve, reject) => {
-      const adbCommand = `adb -s ${serial} ${command}`;
-      logger.debug(`Executing: ${adbCommand}`);
-      
-      const process = spawn('sh', ['-c', adbCommand]);
-      let output = '';
-      let error = '';
-
-      process.stdout.on('data', (data) => {
-        output += data.toString();
-      });
-
-      process.stderr.on('data', (data) => {
-        error += data.toString();
-      });
-
-      process.on('close', (code) => {
-        if (code === 0) {
-          resolve(output);
-        } else {
-          reject(new Error(`ADB command failed (${code}): ${error || 'Unknown error'}`));
-        }
-      });
-    });
-  }
-
-  async stopEmulator(serial) {
-    try {
-      logger.info(`Stopping emulator ${serial}...`);
-      
-      // Kill the emulator process
-      const process = this.processes.get(serial);
-      if (process) {
-        process.kill('SIGTERM');
-        this.processes.delete(serial);
-      }
-
-      // Force stop using ADB as fallback
-      try {
-        await this.executeAdbCommand(serial, 'emu kill');
-      } catch (e) {
-        // Ignore if emulator is already stopped
-      }
-
-      // Update device status
-      const device = deviceManager.get(serial);
-      if (device) {
-        device.status = 'offline';
-      }
-
-      logger.info(`Emulator ${serial} stopped`);
-      return { success: true };
-    } catch (error) {
-      logger.error(`Failed to stop emulator ${serial}: ${error.message}`);
-      throw error;
-    }
-  }
-
-  async cleanupAll() {
-    const startTime = Date.now();
-    const summary = {
-      stopResults: [],
-      processKills: [],
-      cacheCleanup: { errors: [], paths: [], count: 0 },
-      duration: 0
-    };
-
-    // Phase 1: Stop all registered emulators in parallel
-    const stopPromises = [];
-    const devices = deviceManager.list();
-    
-    for (const device of devices) {
-      if (device.platform === 'android' && device.meta?.deviceId) {
-        stopPromises.push(
-          this.stopEmulator(device.meta.deviceId)
-            .then(result => ({ deviceId: device.id, success: true, result }))
-            .catch(error => ({ deviceId: device.id, success: false, error: error.message }))
-        );
-      }
-    }
-
-    if (stopPromises.length > 0) {
-      const stopResults = await Promise.allSettled(stopPromises);
-      summary.stopResults = stopResults.map(result => 
-        result.status === 'fulfilled' ? result.value : { error: result.reason }
-      );
-    }
-
-    // Phase 2: Kill all Android emulator processes in parallel
-    const killPatterns = [
-      ['pkill', ['-f', 'emulator64-crash-service']],
-      ['pkill', ['-f', 'emulator-net']],
-      ['pkill', ['-f', 'qemu-system-x86_64']],
-      ['pkill', ['-f', 'qemu-system-i386']],
-      ['pkill', ['-x', 'emulator']],
-      ['pkill', ['-x', 'emulator64-arm']],
-      ['pkill', ['-f', 'android-emulator']]
+  /**
+   * Build the emulator argv.
+   * Perf notes:
+   *  - Quick boot (snapshot) turns a ~60-90s cold boot into a few seconds.
+   *  - The old args hard-coded `-wipe-data`, forcing a full cold boot every
+   *    single time and then appended it a second time from the flag.
+   * Realism notes:
+   *  - Cameras and audio hardware stay present; the emulator default of
+   *    `-camera-back none` is a giveaway that no real phone shares.
+   *  - Network is shaped to an LTE profile instead of `-netfast`.
+   */
+  buildArgs({ avd, port, proxy, profileName, wipe }) {
+    const args = [
+      '-avd', avd,
+      '-port', String(port),
+      '-accel', 'on',
+      '-gpu', config.emulator.gpu,
+      '-memory', String(resolveMemoryMb(profileName)),
+      '-cores', String(config.emulator.cores),
+      '-no-boot-anim',
     ];
 
-    const killPromises = killPatterns.map(([cmd, args]) => 
-      new Promise((resolve) => {
-        const proc = spawn(cmd, args, { stdio: 'pipe', timeout: 3000 });
-        let stderr = '';
-        
-        proc.stderr.on('data', (d) => stderr += d.toString());
-        
-        proc.on('close', (code) => {
-          resolve({ command: `${cmd} ${args.join(' ')}`, code, stderr: stderr.trim() });
-        });
-        
-        proc.on('error', (err) => {
-          resolve({ command: `${cmd} ${args.join(' ')}`, code: -1, stderr: String(err?.message || err) });
-        });
-        
-        proc.on('timeout', () => {
-          proc.kill('SIGKILL');
-          resolve({ command: `${cmd} ${args.join(' ')}`, code: -1, stderr: 'Timeout' });
-        });
-      })
-    );
+    // -read-only lets several instances share one AVD, at the cost of being
+    // unable to save a snapshot. Opt in only when you actually need it.
+    if (config.emulator.readOnly) args.push('-read-only');
 
-    const killResults = await Promise.allSettled(killPromises);
-    summary.processKills = killResults.map(result => 
-      result.status === 'fulfilled' ? result.value : { error: result.reason }
-    );
+    if (wipe) {
+      // Cold boot onto a fresh data partition, then save a snapshot for next time.
+      args.push('-wipe-data', '-no-snapshot-load');
+    } else if (!config.emulator.quickBoot) {
+      args.push('-no-snapshot');
+    }
+    // Quick boot is the emulator's own default: it loads and saves
+    // `default_boot` on its own, so the fast path passes no snapshot flags.
 
-    // Phase 3: Force kill any remaining emulator processes
+    if (config.emulator.headless) args.push('-no-window');
+    if (!config.emulator.audio) args.push('-no-audio');
+
+    // Only override the AVD's own camera config when explicitly asked; the
+    // profile already configures a back and front camera, and a phone with no
+    // cameras at all is not something an app will ever see in the wild.
+    if (config.emulator.camera) {
+      args.push('-camera-back', config.emulator.camera, '-camera-front', config.emulator.camera);
+    }
+
+    if (config.emulator.netProfile === 'fast') {
+      args.push('-netfast');
+    } else {
+      // A real handset on LTE: shaped throughput and non-zero latency.
+      args.push('-netspeed', 'lte', '-netdelay', 'none');
+    }
+
+    if (proxy) {
+      const normalized = normalizeProxy(proxy);
+      args.push('-http-proxy', normalized);
+      logger.info({ avd, proxy: normalized }, 'emulator using proxy');
+    }
+
+    const dns = config.emulator.dns || (proxy ? '8.8.8.8,1.1.1.1' : '');
+    if (dns) args.push('-dns-server', dns);
+
+    // A writable /system is the only way to change the ro.product.* identity
+    // baked into the image (verified: `-prop` alone leaves ro.product.model as
+    // 'sdk_gphone64_x86_64'). Off by default — it disables verity and slows the
+    // first boot, so opt in only when build identity actually matters.
+    if (config.device.writableSystem) args.push('-writable-system');
+
+    // Best-effort identity hints. These reach the guest as boot properties and
+    // take effect for props the image has not already fixed as read-only.
+    for (const [key, value] of Object.entries(avdConfig.bootProps(profileName))) {
+      args.push('-prop', `${key}=${value}`);
+    }
+
+    return args;
+  }
+
+  /**
+   * Start an emulator and wait until it is usable.
+   * @returns {Promise<{serial:string, port:number, pid:number, avd:string, bootMs:number, profile:object}>}
+   */
+  async start({ avd, proxy, profile: profileName = config.device.profile, wipe } = {}) {
+    if (!avd) {
+      const e = new Error("'avd' is required");
+      e.status = 400;
+      throw e;
+    }
+
+    const available = avdConfig.list();
+    if (!available.includes(avd)) {
+      const e = new Error(`AVD '${avd}' not found. Available: ${available.join(', ') || 'none'}`);
+      e.status = 404;
+      throw e;
+    }
+
+    // Make the virtual hardware match the phone we claim to be before boot.
+    let profileResult = null;
+    if (config.device.applyProfileToAvd) {
+      profileResult = avdConfig.applyProfile(avd, profileName);
+      // Geometry changes invalidate any existing snapshot.
+      if (Object.keys(profileResult.changed).length > 0) wipe = true;
+    }
+
+    const shouldWipe = wipe || config.emulator.wipeData || consumeWipeOnceFlag();
+    const port = await portAllocator.allocate();
+    const serial = `emulator-${port}`;
+    const args = this.buildArgs({ avd, port, proxy, profileName, wipe: shouldWipe });
+
+    logger.info({ avd, serial, wipe: shouldWipe, profile: profileName }, 'starting emulator');
+    const startedAt = Date.now();
+
+    // detached + unref so an API restart does not take the emulator with it.
+    // stdio is piped rather than inherited: 'inherit' meant emulator output
+    // filled the API's own log pipe and could block the process.
+    const proc = spawn('emulator', args, {
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: config.android.env,
+    });
+
+    let earlyError = '';
+    proc.stdout.on('data', (d) => logger.debug({ serial }, d.toString().trim()));
+    proc.stderr.on('data', (d) => {
+      const text = d.toString().trim();
+      earlyError += `${text}\n`;
+      logger.warn({ serial }, text);
+    });
+    proc.on('error', (err) => logger.error({ serial, err: err.message }, 'emulator spawn failed'));
+
+    let exited = false;
+    proc.on('close', (code) => {
+      exited = true;
+      logger.info({ serial, code }, 'emulator process exited');
+      this.processes.delete(serial);
+      portAllocator.release(port);
+    });
+
+    proc.unref();
+    this.processes.set(serial, { process: proc, avd, port, startedAt });
+
     try {
-      const { stdout: psOutput } = await this.executeCommand('ps', ['aux']);
-      const emulatorProcesses = psOutput
-        .split('\n')
-        .filter(line => line.includes('emulator') || line.includes('qemu'))
-        .map(line => {
-          const parts = line.trim().split(/\s+/);
-          return {
-            pid: parts[1],
-            command: parts.slice(10).join(' ')
-          };
-        });
+      await this.waitForBoot(serial, () => exited);
+    } catch (e) {
+      portAllocator.release(port);
+      try { proc.kill('SIGKILL'); } catch (_) { /* already gone */ }
+      e.message = `${e.message}${earlyError ? ` (emulator said: ${earlyError.trim().split('\n').slice(-3).join(' | ')})` : ''}`;
+      throw e;
+    }
 
-      const forceKillPromises = emulatorProcesses.map(({ pid, command }) =>
-        new Promise((resolve) => {
-          try {
-            process.kill(pid, 'SIGKILL');
-            resolve({ pid, command, killed: true });
-          } catch (e) {
-            resolve({ pid, command, killed: false, error: e.message });
+    const bootMs = Date.now() - startedAt;
+    logger.info({ serial, bootMs }, 'emulator booted');
+
+    await this.configureDevice(serial, profileName);
+    portAllocator.release(port); // now tracked via `adb devices`
+
+    return { serial, port, pid: proc.pid, avd, bootMs, profile: profileResult, command: `emulator ${args.join(' ')}` };
+  }
+
+  /**
+   * Block until the device reports a completed boot.
+   * The old code returned as soon as spawn() resolved, so every command issued
+   * right after /devices/register raced an unbooted device.
+   */
+  async waitForBoot(serial, hasExited = () => false, timeoutMs = config.emulator.bootTimeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    let lastState = '';
+
+    while (Date.now() < deadline) {
+      if (hasExited()) {
+        const e = new Error(`Emulator ${serial} exited before finishing boot`);
+        e.status = 500;
+        throw e;
+      }
+
+      try {
+        const booted = await getProp(serial, 'sys.boot_completed');
+        if (booted === '1') {
+          // boot_completed fires before the launcher settles; package manager
+          // readiness is what actually makes `pm`/`am` reliable.
+          const pm = await shell(serial, ['pm', 'path', 'android'], { check: false });
+          if (pm.includes('package:')) {
+            const anim = await getProp(serial, 'init.svc.bootanim');
+            if (anim !== 'running') return true;
           }
-        })
-      );
-
-      const forceKillResults = await Promise.allSettled(forceKillPromises);
-      summary.processKills.push(...forceKillResults.map(result => 
-        result.status === 'fulfilled' ? result.value : { error: result.reason }
-      ));
-    } catch (e) {
-      summary.processKills.push({ error: `Process enumeration failed: ${e.message}` });
-    }
-
-    // Phase 4: Clear Android emulator caches and temp files in parallel
-    const home = process.env.HOME || process.env.USERPROFILE || '';
-    const cacheCleanupPromises = [];
-
-    if (home) {
-      const cachePaths = [
-        path.join(home, '.android', 'avd'),
-        path.join(home, '.android', 'cache'),
-        path.join(home, '.android', 'breakpad'),
-        '/tmp/android-*',
-        '/tmp/emulator-*',
-        '/tmp/qemu-*'
-      ];
-
-      for (const cachePath of cachePaths) {
-        cacheCleanupPromises.push(
-          new Promise((resolve) => {
-            try {
-              if (cachePath.startsWith('/tmp/')) {
-                // Handle temp files with glob pattern
-                const { spawn } = require('child_process');
-                const proc = spawn('find', ['/tmp', '-maxdepth', '1', '-name', cachePath.split('/tmp/')[1], '-exec', 'rm', '-rf', '{}', '+']);
-                
-                proc.on('close', (code) => {
-                  resolve({ path: cachePath, cleaned: code === 0, error: null });
-                });
-                
-                proc.on('error', (err) => {
-                  resolve({ path: cachePath, cleaned: false, error: err.message });
-                });
-              } else if (fs.existsSync(cachePath)) {
-                // Handle directory cleanup
-                const entries = fs.readdirSync(cachePath, { withFileTypes: true });
-                let cleanedCount = 0;
-                const errors = [];
-
-                for (const entry of entries) {
-                  const fullPath = path.join(cachePath, entry.name);
-                  try {
-                    if (entry.isDirectory()) {
-                      // Only clean cache/data directories, not AVD definitions
-                      if (!fullPath.endsWith('.ini') && !fullPath.includes('system-images')) {
-                        fs.rmSync(fullPath, { recursive: true, force: true });
-                        cleanedCount++;
-                      }
-                    } else {
-                      // Remove cache files
-                      if (fullPath.includes('.cache') || fullPath.includes('.lock') || fullPath.includes('.tmp')) {
-                        fs.unlinkSync(fullPath);
-                        cleanedCount++;
-                      }
-                    }
-                  } catch (e) {
-                    errors.push(`${fullPath}: ${e.message}`);
-                  }
-                }
-                resolve({ path: cachePath, cleanedCount, errors });
-              } else {
-                resolve({ path: cachePath, cleanedCount: 0, errors: [] });
-              }
-            } catch (e) {
-              resolve({ path: cachePath, cleanedCount: 0, errors: [e.message] });
-            }
-          })
-        );
-      }
-    }
-
-    // Execute all cache cleanup operations in parallel
-    if (cacheCleanupPromises.length > 0) {
-      const cacheResults = await Promise.allSettled(cacheCleanupPromises);
-      cacheResults.forEach(result => {
-        if (result.status === 'fulfilled') {
-          const { path, cleanedCount, errors } = result.value;
-          summary.cacheCleanup.paths.push(path);
-          summary.cacheCleanup.count += cleanedCount || 0;
-          summary.cacheCleanup.errors.push(...(errors || []));
-        } else {
-          summary.cacheCleanup.errors.push(result.reason);
         }
-      });
+        lastState = booted;
+      } catch (e) {
+        lastState = e.message;
+      }
+
+      await sleep(1500);
     }
 
-    // Phase 5: Clear device registry and state
+    const e = new Error(`Timed out after ${timeoutMs}ms waiting for ${serial} to boot (last state: ${lastState || 'no response'})`);
+    e.status = 504;
+    throw e;
+  }
+
+  /**
+   * Post-boot settings that make the device behave like a real handset in use,
+   * and remove the things that made automation flaky.
+   */
+  async configureDevice(serial, profileName = config.device.profile) {
+    const profile = profiles.get(profileName);
+    const applied = [];
+    const failed = [];
+
+    const put = async (namespace, key, value) => {
+      try {
+        await shell(serial, ['settings', 'put', namespace, key, String(value)]);
+        applied.push(`${namespace}.${key}=${value}`);
+      } catch (e) {
+        failed.push(`${namespace}.${key}: ${e.message}`);
+      }
+    };
+
+    const run = async (label, parts) => {
+      try {
+        await shell(serial, parts, { check: false });
+        applied.push(label);
+      } catch (e) {
+        failed.push(`${label}: ${e.message}`);
+      }
+    };
+
+    // --- Reliability -------------------------------------------------------
+    // Stops "X isn't responding" dialogs at the source. This is what makes the
+    // per-command UI polling in the old dialogHandler unnecessary.
     try {
-      deviceManager.clear();
-      const stateFiles = [
-        path.join(__dirname, '../../.state'),
-        path.join(__dirname, '../../devices.json'),
-        path.join(__dirname, '../../registry.json')
-      ];
-
-      for (const stateFile of stateFiles) {
-        try {
-          if (fs.existsSync(stateFile)) {
-            fs.rmSync(stateFile, { recursive: true, force: true });
-            summary.cacheCleanup.paths.push(stateFile);
-          }
-        } catch (e) {
-          summary.cacheCleanup.errors.push(`${stateFile}: ${e.message}`);
-        }
-      }
+      await suppressDialogs(serial);
+      applied.push('error dialogs suppressed');
     } catch (e) {
-      summary.cacheCleanup.errors.push(`Registry cleanup failed: ${e.message}`);
+      failed.push(`suppressDialogs: ${e.message}`);
     }
 
-    // Phase 6: Restart API via PM2
+    // Keep the screen on and unlocked so screenshots and taps land.
+    await put('global', 'stay_on_while_plugged_in', 7);
+    await run('dismiss keyguard', ['wm', 'dismiss-keyguard']);
+
+    // The "Swipe up to exit full screen" overlay takes window focus and makes
+    // uiautomator return "null root node", breaking every UI query underneath.
+    await put('secure', 'immersive_mode_confirmations', 'confirmed');
+
+    // --- Realism -----------------------------------------------------------
+    // A real phone is not sitting at 100% on AC forever.
+    await run('battery level', ['dumpsys', 'battery', 'set', 'level', String(config.device.batteryLevel)]);
+    await run('battery unplugged', ['dumpsys', 'battery', 'unplug']);
+    await run('battery discharging', ['dumpsys', 'battery', 'set', 'status', '3']);
+
+    if (profile) {
+      // Shows up in Settings and in Bluetooth/Wi-Fi Direct advertisements.
+      await put('global', 'device_name', profile.props['ro.product.model']);
+      await run('bluetooth name', ['settings', 'put', 'secure', 'bluetooth_name', profile.props['ro.product.model']]);
+    }
+
+    await run('timezone', ['setprop', 'persist.sys.timezone', config.device.timezone]);
+    await put('system', 'screen_off_timeout', 120000);
+    await put('system', 'screen_brightness_mode', 1);
+    await put('secure', 'location_mode', 3);
+    // A freshly-flashed device has setup completed; leaving these at 0 leaves
+    // the setup wizard hanging in front of every app.
+    await put('secure', 'user_setup_complete', 1);
+    await put('global', 'device_provisioned', 1);
+
+    // Animation scales: real devices animate. Only flatten them when the
+    // caller has explicitly traded realism for automation speed.
+    const scale = config.device.disableAnimations ? '0' : '1';
+    await put('global', 'window_animation_scale', scale);
+    await put('global', 'transition_animation_scale', scale);
+    await put('global', 'animator_duration_scale', scale);
+
+    logger.info({ serial, applied: applied.length, failed: failed.length }, 'device configured');
+    if (failed.length) logger.debug({ serial, failed }, 'some device settings failed');
+
+    return { applied, failed };
+  }
+
+  /** Grant a permission, ignoring "not a changeable permission" noise. */
+  async grantPermission(serial, pkg, permission) {
+    return shell(serial, ['pm', 'grant', pkg, permission], { check: false });
+  }
+
+  /** Stop one emulator: console kill first, then the process group. */
+  async stop(serial) {
+    const entry = this.processes.get(serial);
+    const errors = [];
+
     try {
-      const pm2Service = process.env.PM2_APP_NAME || 'android-emulator-api';
-      logger.info(`Restarting PM2 service: ${pm2Service}`);
-      
-      // First check if PM2 is available and the service exists
-      const checkResult = await new Promise((resolve) => {
-        const proc = spawn('pm2', ['list'], { stdio: 'pipe', timeout: 5000 });
-        let stdout = '';
-        let stderr = '';
-        
-        proc.stdout.on('data', (data) => stdout += data.toString());
-        proc.stderr.on('data', (data) => stderr += data.toString());
-        
-        proc.on('close', (code) => {
-          resolve({ code, stdout: stdout.trim(), stderr: stderr.trim() });
-        });
-        
-        proc.on('error', (err) => {
-          resolve({ code: -1, stdout: '', stderr: err.message });
-        });
-      });
-      
-      if (checkResult.code !== 0) {
-        throw new Error(`PM2 not available: ${checkResult.stderr}`);
-      }
-      
-      // Check if our service exists in PM2 list
-      if (!checkResult.stdout.includes(pm2Service)) {
-        logger.warn(`PM2 service '${pm2Service}' not found in PM2 list`);
-        logger.info(`Available PM2 services:\n${checkResult.stdout}`);
-        
-        // Try to find any android-emulator related service
-        const matchingServices = checkResult.stdout.split('\n')
-          .filter(line => line.includes('android-emulator'))
-          .map(line => line.trim().split(/\s+/)[2]) // Extract service name
-          .filter(name => name);
-        
-        if (matchingServices.length > 0) {
-          logger.info(`Found matching services: ${matchingServices.join(', ')}`);
-          pm2Service = matchingServices[0]; // Use the first match
-        }
-      }
-      
-      const restartResult = await new Promise((resolve) => {
-        logger.debug(`Executing: pm2 restart ${pm2Service}`);
-        const proc = spawn('pm2', ['restart', pm2Service], { 
-          stdio: ['pipe', 'pipe', 'pipe'], 
-          timeout: 15000,
-          env: { ...process.env, PM2_HOME: process.env.PM2_HOME || undefined }
-        });
-        
-        let stdout = '';
-        let stderr = '';
-        
-        proc.stdout.on('data', (data) => {
-          const chunk = data.toString();
-          stdout += chunk;
-          logger.debug(`PM2 stdout: ${chunk.trim()}`);
-        });
-        
-        proc.stderr.on('data', (data) => {
-          const chunk = data.toString();
-          stderr += chunk;
-          logger.debug(`PM2 stderr: ${chunk.trim()}`);
-        });
-        
-        proc.on('close', (code) => {
-          logger.debug(`PM2 restart exited with code: ${code}`);
-          resolve({
-            command: `pm2 restart ${pm2Service}`,
-            code,
-            stdout: stdout.trim(),
-            stderr: stderr.trim()
-          });
-        });
-        
-        proc.on('error', (err) => {
-          logger.error(`PM2 restart process error: ${err.message}`);
-          resolve({
-            command: `pm2 restart ${pm2Service}`,
-            code: -1,
-            stdout: '',
-            stderr: err.message
-          });
-        });
-        
-        proc.on('timeout', () => {
-          logger.error(`PM2 restart timed out after 15 seconds`);
-          proc.kill('SIGKILL');
-          resolve({
-            command: `pm2 restart ${pm2Service}`,
-            code: -1,
-            stdout: '',
-            stderr: 'Timeout after 15 seconds'
-          });
-        });
-      });
-      
-      summary.pm2Restart = restartResult;
-      
-      if (restartResult.code === 0) {
-        logger.info(`PM2 service '${pm2Service}' restarted successfully`);
-        logger.info(`PM2 output: ${restartResult.stdout}`);
-      } else {
-        logger.error(`PM2 restart failed with code ${restartResult.code}`);
-        logger.error(`PM2 stderr: ${restartResult.stderr}`);
-        logger.error(`PM2 stdout: ${restartResult.stdout}`);
-      }
+      await adbText(serial, ['emu', 'kill'], { check: false, timeoutMs: 10000 });
     } catch (e) {
-      logger.error(`PM2 restart exception: ${e.message}`);
-      summary.pm2Restart = {
-        command: 'pm2 restart android-emulator-api',
-        code: -1,
-        stdout: '',
-        stderr: e.message
-      };
+      errors.push(`emu kill: ${e.message}`);
     }
 
-    // Calculate total duration
-    summary.duration = Date.now() - startTime;
-    
-    logger.info(`Android emulator cleanup completed in ${summary.duration}ms`);
+    // Give the console kill a moment before escalating.
+    for (let i = 0; i < 10; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      if (!(await listEmulators()).includes(serial)) break;
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(500);
+    }
+
+    if (entry?.process?.pid) {
+      try {
+        // Negative pid: the emulator was spawned detached, so kill the whole
+        // group — killing only the launcher orphans the qemu child.
+        process.kill(-entry.process.pid, 'SIGKILL');
+      } catch (e) {
+        if (e.code !== 'ESRCH') errors.push(`kill group: ${e.message}`);
+      }
+      this.processes.delete(serial);
+      portAllocator.release(entry.port);
+    }
+
+    return { serial, stopped: errors.length === 0, errors };
+  }
+
+  /**
+   * Stop every emulator this host is running.
+   *
+   * Deliberately narrower than the previous implementation, which:
+   *   - deleted every `*.avd` directory under ~/.android/avd (the AVDs
+   *     themselves, not caches) — unrecoverable data loss;
+   *   - force-killed every process whose `ps aux` line contained 'emulator',
+   *     which matches this API's own path (/var/www/.../android-emulator-api);
+   *   - restarted itself through PM2 as a side effect of a cleanup call.
+   */
+  async cleanupAll({ wipeNextStart = true } = {}) {
+    const startedAt = Date.now();
+    const summary = { stopped: [], leftovers: [], wipeNextStart: false, durationMs: 0 };
+
+    const serials = new Set([...this.processes.keys(), ...(await listEmulators())]);
+    const results = await Promise.allSettled([...serials].map((serial) => this.stop(serial)));
+    summary.stopped = results.map((r) => (r.status === 'fulfilled' ? r.value : { error: String(r.reason?.message || r.reason) }));
+
+    // Anything still answering adb after a graceful stop.
+    summary.leftovers = await listEmulators();
+
+    if (wipeNextStart) summary.wipeNextStart = setWipeOnceFlag();
+
+    summary.durationMs = Date.now() - startedAt;
+    logger.info({ stopped: summary.stopped.length, leftovers: summary.leftovers.length, durationMs: summary.durationMs }, 'cleanup complete');
     return summary;
   }
 
-  async executeCommand(command, args = []) {
-    return new Promise((resolve, reject) => {
-      const proc = spawn(command, args, { stdio: 'pipe' });
-      let output = '';
-      let error = '';
-
-      proc.stdout.on('data', (data) => {
-        output += data.toString();
-      });
-
-      proc.stderr.on('data', (data) => {
-        error += data.toString();
-      });
-
-      proc.on('close', (code) => {
-        if (code === 0) {
-          resolve(output);
-        } else {
-          reject(new Error(`Command failed with code ${code}: ${error || 'Unknown error'}`));
-        }
-      });
-
-      proc.on('error', (err) => {
-        reject(err);
-      });
-    });
-  }
-
-  getEmulatorStatus() {
+  status() {
     return {
-      processes: Array.from(this.processes.entries()).map(([serial, process]) => ({
+      running: [...this.processes.entries()].map(([serial, entry]) => ({
         serial,
-        pid: process.pid,
-        status: 'running'
+        avd: entry.avd,
+        port: entry.port,
+        pid: entry.process.pid,
+        uptimeMs: Date.now() - entry.startedAt,
       })),
-      devices: deviceManager.list()
     };
   }
 }
 
-module.exports = new EmulatorManager();
+module.exports = new EmulatorService();
+module.exports.setWipeOnceFlag = setWipeOnceFlag;
+module.exports.normalizeProxy = normalizeProxy;

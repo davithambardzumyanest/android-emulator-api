@@ -1,0 +1,130 @@
+// Central configuration. Everything tunable lives here so behaviour is
+// predictable and no SDK paths are hard-coded in service code.
+const os = require('os');
+const path = require('path');
+const fs = require('fs');
+const { execFileSync } = require('child_process');
+
+function bool(value, fallback = false) {
+  if (value === undefined || value === null || value === '') return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
+}
+
+function int(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.trunc(n) : fallback;
+}
+
+const home = process.env.HOME || os.homedir();
+
+/**
+ * Locate the Android SDK.
+ * The previous code hard-coded '/root/Android/Sdk', which is wrong for any
+ * host that does not run this API as root — including this one, where the SDK
+ * lives at /usr/lib/android-sdk. Detection order: explicit env, the real path
+ * behind the `emulator` binary on PATH, then the usual install locations.
+ */
+function detectSdkRoot() {
+  if (process.env.ANDROID_SDK_ROOT) return process.env.ANDROID_SDK_ROOT;
+  if (process.env.ANDROID_HOME) return process.env.ANDROID_HOME;
+
+  // `emulator` lives in <sdk>/emulator, so its real path names the SDK.
+  try {
+    const resolved = fs.realpathSync(
+      execFileSync('which', ['emulator'], { encoding: 'utf8' }).trim(),
+    );
+    const root = path.dirname(path.dirname(resolved));
+    if (fs.existsSync(path.join(root, 'platform-tools'))) return root;
+  } catch (_) { /* emulator not on PATH */ }
+
+  const candidates = [
+    path.join(home, 'Android', 'Sdk'),
+    path.join(home, 'android-sdk'),
+    '/usr/lib/android-sdk',
+    '/opt/android-sdk',
+    '/usr/local/lib/android/sdk',
+  ];
+  return candidates.find((dir) => fs.existsSync(dir)) || path.join(home, 'Android', 'Sdk');
+}
+
+const sdkRoot = detectSdkRoot();
+
+const config = {
+  port: int(process.env.PORT, 3000),
+  logLevel: process.env.LOG_LEVEL || 'info',
+
+  android: {
+    sdkRoot,
+    avdHome: process.env.ANDROID_AVD_HOME || path.join(home, '.android', 'avd'),
+    // Extra directories appended to PATH for spawned SDK binaries.
+    binPaths: [
+      path.join(sdkRoot, 'emulator'),
+      path.join(sdkRoot, 'platform-tools'),
+      path.join(sdkRoot, 'cmdline-tools', 'latest', 'bin'),
+    ],
+  },
+
+  emulator: {
+    headless: bool(process.env.EMULATOR_HEADLESS, false),
+    gpu: process.env.EMULATOR_GPU || 'swiftshader_indirect',
+    // Unset => derive from the device profile, clamped to host RAM.
+    memoryMb: int(process.env.EMULATOR_MEMORY_MB, null),
+    cores: int(process.env.EMULATOR_CORES, 4),
+    dns: process.env.EMULATOR_DNS || '',
+    // Quick boot reuses the AVD snapshot: seconds instead of a cold boot.
+    quickBoot: bool(process.env.EMULATOR_QUICK_BOOT, true),
+    // Needed only to run several instances of the SAME AVD. It makes the AVD
+    // files read-only, which also stops snapshots being saved — so leaving it
+    // on permanently means quick boot can never take effect.
+    readOnly: bool(process.env.EMULATOR_READ_ONLY, false),
+    // Only wipe when explicitly asked (or when /cleanup armed the one-shot flag).
+    wipeData: bool(process.env.EMULATOR_WIPE_DATA, false),
+    bootTimeoutMs: int(process.env.EMULATOR_BOOT_TIMEOUT_MS, 300000),
+    // Emulator console ports are even and live in this range.
+    portRange: { min: 5554, max: 5680 },
+    // 'lte' models a real mobile link; 'fast' is the unthrottled emulator default.
+    netProfile: (process.env.EMULATOR_NET_PROFILE || 'lte').toLowerCase(),
+    audio: bool(process.env.EMULATOR_AUDIO, false),
+    // Unset => let the AVD's config.ini decide (virtualscene back, emulated front).
+    camera: process.env.EMULATOR_CAMERA || '',
+  },
+
+  device: {
+    // Hardware profile applied to new/patched AVDs; see src/devices/profiles.js
+    profile: process.env.DEVICE_PROFILE || 'pixel_5',
+    locale: process.env.DEVICE_LOCALE || 'en-US',
+    timezone: process.env.DEVICE_TIMEZONE || 'America/New_York',
+    batteryLevel: int(process.env.DEVICE_BATTERY_LEVEL, 87),
+    // Realistic devices animate. Turn on only when you need raw automation speed.
+    disableAnimations: bool(process.env.DEVICE_DISABLE_ANIMATIONS, false),
+    // Rewrite AVD config.ini from the profile before each boot.
+    applyProfileToAvd: bool(process.env.DEVICE_APPLY_PROFILE, true),
+    // Boot with a writable /system so build.prop can be patched. Required for
+    // real build-identity spoofing; see "Device realism" in the README.
+    writableSystem: bool(process.env.DEVICE_WRITABLE_SYSTEM, false),
+  },
+
+  adb: {
+    timeoutMs: int(process.env.ADB_TIMEOUT_MS, 30000),
+    maxBuffer: int(process.env.ADB_MAX_BUFFER, 32 * 1024 * 1024),
+    // UI dumps are expensive; reuse a fresh one across calls in this window.
+    uiCacheMs: int(process.env.ADB_UI_CACHE_MS, 400),
+  },
+
+  security: {
+    apiToken: process.env.API_TOKEN || '',
+    corsOrigin: process.env.CORS_ORIGIN || '*',
+    // /devices/:id/adb runs arbitrary adb subcommands; off by default.
+    allowRawAdb: bool(process.env.ALLOW_RAW_ADB, false),
+  },
+};
+
+// PATH used for every spawned SDK binary.
+config.android.env = {
+  ...process.env,
+  ANDROID_SDK_ROOT: sdkRoot,
+  ANDROID_HOME: sdkRoot,
+  PATH: [process.env.PATH, ...config.android.binPaths].filter(Boolean).join(':'),
+};
+
+module.exports = config;

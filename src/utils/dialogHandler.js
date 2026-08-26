@@ -1,83 +1,91 @@
-// src/utils/dialogHandler.js
-const { exec } = require('child_process');
-const { promisify } = require('util');
-const fs = require('fs');
-const { XMLParser } = require('fast-xml-parser');
-const execAsync = promisify(exec);
+// System dialog handling.
+//
+// The previous implementation ran a full uiautomator dump + adb pull + local
+// file read before *every* adb command, then decided a dialog was present if
+// the XML contained the string 'com.android.systemui' — which it always does,
+// because the status and navigation bars are systemui windows. It then clicked
+// the first substring match for one of Wait/OK/Dismiss/Close/Yes/No/Cancel, so
+// 'No' matched labels like "Notifications" and "Now", tapping random UI.
+//
+// The fix has two halves:
+//   1. suppressDialogs() sets `hide_error_dialogs`, which stops ANR and crash
+//      dialogs from ever appearing. Applied once at boot.
+//   2. handleSystemDialogs() only looks at *actual* dialog windows and matches
+//      button labels exactly, and is called explicitly rather than on every
+//      command.
+const { shell } = require('./adb');
+const ui = require('./ui');
+const logger = require('../logger');
+
+// Matched against a node's resource-id / class to decide it is really a dialog.
+const DIALOG_MARKERS = [
+  'android:id/alertTitle',
+  'android:id/aerr_',          // "isn't responding" / "has stopped"
+  'android:id/button1',
+  'com.android.permissioncontroller',
+  'com.google.android.permissioncontroller',
+];
+
+// Exact labels, most-preferred first. Exact matching only — substring matching
+// is what made the old handler tap arbitrary controls.
+const DISMISS_LABELS = ['Wait', 'OK', 'Ok', 'Got it', 'Dismiss', 'Close', 'Continue'];
 
 /**
- * Handle system dialogs (e.g., "System UI isn't responding") using UIAutomator dump
- * @param {string} serial - ADB device serial
- * @returns {Promise<boolean>} - true if a dialog was handled
+ * Ask the platform to stop showing ANR/crash dialogs at all.
+ * Call once after boot; cheap and removes the need to poll for them.
  */
-async function handleSystemDialogs(serial) {
-    const deviceDumpFile = `/sdcard/window_dump_${serial}.xml`;
-    const localDumpFile = `/tmp/window_dump_${serial}.xml`;
-    
-    try {
-        // 1️⃣ Dump UI hierarchy to device
-        await execAsync(`adb -s ${serial} shell uiautomator dump --compressed ${deviceDumpFile}`);
-
-        // 2️⃣ Pull XML to local
-        await execAsync(`adb -s ${serial} pull ${deviceDumpFile} ${localDumpFile}`);
-
-        // 3️⃣ Read XML content
-        const xmlData = fs.readFileSync(localDumpFile, 'utf-8');
-
-        // 4️⃣ Check for any system dialogs that need handling
-        const hasSystemDialog = (
-            xmlData.includes("System UI isn't responding") || 
-            xmlData.includes("isn't responding") ||
-            xmlData.includes('com.android.systemui') ||
-            xmlData.includes('android:id/alertTitle')
-        );
-
-        if (!hasSystemDialog) {
-            return false; // No dialog present
-        }
-        
-        console.log(`[${serial}] System dialog detected, attempting to handle...`);
-        
-        // Use clickByText to handle the "Wait" button or other dialog buttons
-        const device = { meta: { deviceId: serial }, platform: 'android' };
-        const android = require('../platforms/android');
-        
-        // Try to find and click common dialog buttons in order of preference
-        const buttonsToTry = ['Wait', 'OK', 'Dismiss', 'Close', 'Yes', 'No', 'Cancel'];
-        
-        for (const buttonText of buttonsToTry) {
-            try {
-                await android.clickByText(device, { 
-                    text: buttonText,
-                    exact: false,
-                    index: 0,
-                    skipDialogCheck: true
-                });
-                console.log(`[${serial}] Successfully clicked "${buttonText}" button`);
-                return true;
-            } catch (clickError) {
-                // Ignore and try the next button
-                continue;
-            }
-        }
-        
-        // If we get here, no known buttons were found
-        console.warn(`[${serial}] No known dialog buttons found to click`);
-        return false;
-
-    } catch (error) {
-        console.error(`[${serial}] Error handling system dialogs:`, error);
-        return false;
-    } finally {
-        // Clean up files in all cases
-        try {
-            if (fs.existsSync(localDumpFile)) {
-                fs.unlinkSync(localDumpFile);
-            }
-        } catch (cleanupError) {
-            console.warn(`[${serial}] Failed to clean up temporary files:`, cleanupError);
-        }
-    }
+async function suppressDialogs(serial) {
+  const settings = [
+    ['global', 'hide_error_dialogs', '1'],
+    ['global', 'anr_show_background', '0'],
+    ['secure', 'anr_show_background', '0'],
+  ];
+  for (const [namespace, key, value] of settings) {
+    // eslint-disable-next-line no-await-in-loop
+    await shell(serial, ['settings', 'put', namespace, key, value], { check: false });
+  }
 }
 
-module.exports = { handleSystemDialogs };
+/** True when the dump contains a real dialog window, not just system chrome. */
+function looksLikeDialog(nodes) {
+  return nodes.some((node) => {
+    const id = node['resource-id'] || '';
+    return DIALOG_MARKERS.some((marker) => id.startsWith(marker));
+  });
+}
+
+/**
+ * Detect and dismiss a system dialog.
+ * @param {string} serial
+ * @returns {Promise<boolean>} true when a dialog was dismissed
+ */
+async function handleSystemDialogs(serial) {
+  let nodes;
+  try {
+    nodes = await ui.nodes(serial);
+  } catch (e) {
+    logger.debug({ serial, err: e.message }, 'dialog check: could not read UI');
+    return false;
+  }
+
+  if (!looksLikeDialog(nodes)) return false;
+
+  for (const label of DISMISS_LABELS) {
+    const [target] = ui.match(nodes, { text: label, exact: true, field: 'text' });
+    if (!target) continue;
+
+    const bounds = ui.parseBounds(target.bounds);
+    if (!bounds) continue;
+
+    // eslint-disable-next-line no-await-in-loop
+    await shell(serial, ['input', 'tap', String(bounds.centerX), String(bounds.centerY)]);
+    ui.invalidate(serial);
+    logger.info({ serial, label }, 'dismissed system dialog');
+    return true;
+  }
+
+  logger.warn({ serial }, 'dialog detected but no known dismiss button found');
+  return false;
+}
+
+module.exports = { handleSystemDialogs, suppressDialogs };

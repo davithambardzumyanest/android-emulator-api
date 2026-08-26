@@ -1,509 +1,345 @@
-const { exec } = require('child_process');
-const { promisify } = require('util');
-const { PassThrough } = require('stream');
-const execAsync = promisify(exec);
+// Android device control.
+//
+// Every command goes through src/utils/adb, which spawns argv arrays and quotes
+// each part for the device shell. The previous version built command strings and
+// passed them to exec(), so any text, intent URI or package name containing shell
+// metacharacters was executed on the host.
+const { adbText, adbBuffer, shell, getProp } = require('../utils/adb');
+const ui = require('../utils/ui');
+const finder = require('../utils/finder');
+const logger = require('../logger');
 
-// Make exec available globally for the module
-const { exec: execSync } = require('child_process');
-
-// Helper to run adb commands, optionally targeting a specific device serial
-async function adb(command, { serial } = {}) {
-  const prefix = serial ? `adb -s ${serial}` : 'adb';
-  const full = `${prefix} ${command}`;
-  const { stdout, stderr } = await execAsync(full);
-  if (stderr && stderr.trim()) {
-    // adb often writes non-fatal info to stderr; do not throw unless clear error
-    if (/error|failed/i.test(stderr) && !/grep.*no such file/i.test(stderr)) throw new Error(stderr.trim());
+function serialOf(device) {
+  const serial = device?.meta?.deviceId || device?.meta?.serial;
+  if (!serial) {
+    const e = new Error('Device serial not found. Register the device before sending commands.');
+    e.status = 400;
+    throw e;
   }
-  return stdout;
+  return serial;
+}
+
+/** Screen-changing commands must drop the cached UI dump. */
+async function act(device, parts, opts) {
+  const serial = serialOf(device);
+  const out = await shell(serial, parts, opts);
+  ui.invalidate(serial);
+  return out;
 }
 
 module.exports = {
-  // meta: { serial } should be stored on device.meta.serial when registering
   async launchApp(device, appId) {
-    const serial = device?.meta?.deviceId;
-    
-    if (!serial) {
-      throw new Error('Device serial not found. Make sure the device is properly registered with a valid deviceId.');
-    }
-    
-    // Prefer 'am start' to launch activity; if main activity unknown, fallback to monkey
-    try {
-      await adb(`shell monkey -p ${appId} -c android.intent.category.LAUNCHER 1`, { serial });
-    } catch (_) {
-      await adb(`shell am start -n ${appId}/.MainActivity`, { serial });
-    }
-    return { ok: true };
-  },
+    const serial = serialOf(device);
 
-  async intent(device, { action, data, category, component, flags, extras } = {}) {
-    const serial = device?.meta?.deviceId;
-    
-    if (!serial) {
-      throw new Error('Device serial not found. Make sure the device is properly registered with a valid deviceId.');
+    // `monkey` finds the launcher activity without us knowing its name, but it
+    // exits 0 even when the package is missing, so verify the package first.
+    const path = await shell(serial, ['pm', 'path', appId], { check: false });
+    if (!path.includes('package:')) {
+      const e = new Error(`Package '${appId}' is not installed`);
+      e.status = 404;
+      throw e;
     }
-    
-    const parts = ['shell', 'am', 'start'];
-    if (action) parts.push('-a', action);
-    if (data) parts.push('-d', `'${data}'`);
-    if (category) parts.push('-c', category);
-    if (component) parts.push('-n', component);
-    if (typeof flags === 'number') parts.push('-f', String(flags));
-    if (extras && typeof extras === 'object') {
-      for (const [k, v] of Object.entries(extras)) {
-        if (typeof v === 'number') {
-          parts.push('-ei', k, String(v));
-        } else if (typeof v === 'boolean') {
-          parts.push('-ez', k, v ? 'true' : 'false');
-        } else {
-          parts.push('-e', k, String(v));
-        }
-      }
-    }
-    await adb(parts.join(' '), { serial });
-    return { ok: true };
+
+    await shell(serial, ['monkey', '-p', appId, '-c', 'android.intent.category.LAUNCHER', '1']);
+    ui.invalidate(serial);
+    return { ok: true, appId };
   },
 
   async closeApp(device, appId) {
-    const serial = device?.meta?.deviceId;
-    
-    if (!serial) {
-      throw new Error('Device serial not found. Make sure the device is properly registered with a valid deviceId.');
+    if (!appId) {
+      const e = new Error("'appId' is required to close an app");
+      e.status = 400;
+      throw e;
     }
-    
-    if (!appId) return { ok: false, error: "'appId' required to close app" };
-    await adb(`shell am force-stop ${appId}`, { serial });
-    return { ok: true };
+    await act(device, ['am', 'force-stop', appId]);
+    return { ok: true, appId };
+  },
+
+  async intent(device, { action, data, category, component, flags, extras } = {}) {
+    const parts = ['am', 'start'];
+    if (action) parts.push('-a', action);
+    if (data) parts.push('-d', data);
+    if (category) parts.push('-c', category);
+    if (component) parts.push('-n', component);
+    if (Number.isFinite(flags)) parts.push('-f', String(flags));
+
+    if (extras && typeof extras === 'object') {
+      for (const [key, value] of Object.entries(extras)) {
+        if (typeof value === 'number') parts.push(Number.isInteger(value) ? '-ei' : '-ef', key, String(value));
+        else if (typeof value === 'boolean') parts.push('-ez', key, value ? 'true' : 'false');
+        else parts.push('-e', key, String(value));
+      }
+    }
+
+    const out = await act(device, parts);
+    // `am start` reports failures on stdout with a zero exit code.
+    if (/^Error:/m.test(out)) {
+      const e = new Error(out.split('\n').find((line) => line.startsWith('Error:')) || out);
+      e.status = 400;
+      throw e;
+    }
+    return { ok: true, output: out };
   },
 
   async tap(device, { x, y }) {
-    const serial = device?.meta?.deviceId;
-    
-    if (!serial) {
-      throw new Error('Device serial not found. Make sure the device is properly registered with a valid deviceId.');
-    }
-    
-    await adb(`shell input tap ${x} ${y}`, { serial });
-    return { ok: true };
+    await act(device, ['input', 'tap', String(Math.round(x)), String(Math.round(y))]);
+    return { ok: true, x, y };
   },
 
   async swipe(device, { x1, y1, x2, y2, durationMs = 300 }) {
-    const serial = device?.meta?.deviceId;
-    
-    if (!serial) {
-      throw new Error('Device serial not found. Make sure the device is properly registered with a valid deviceId.');
-    }
-    
-    await adb(`shell input swipe ${x1} ${y1} ${x2} ${y2} ${Math.max(1, durationMs)}` , { serial });
+    const duration = Math.max(1, Math.round(durationMs));
+    await act(device, [
+      'input', 'swipe',
+      String(Math.round(x1)), String(Math.round(y1)),
+      String(Math.round(x2)), String(Math.round(y2)),
+      String(duration),
+    ]);
     return { ok: true };
   },
 
   async type(device, { text }) {
-    const serial = device?.meta?.deviceId;
-    
-    if (!serial) {
-      throw new Error('Device serial not found. Make sure the device is properly registered with a valid deviceId.');
+    // shellQuote (applied inside shell()) wraps the text in single quotes, so
+    // spaces and metacharacters survive intact — the old '%s' substitution only
+    // covered spaces and broke on &, ", $, ` and friends.
+    if (/[^\x20-\x7E]/.test(text)) {
+      logger.warn('type(): non-ASCII text is not reliably supported by `input text`');
     }
-    
-    // Escape spaces
-    const escaped = text.replace(/ /g, '%s');
-    await adb(`shell input text "${escaped}"`, { serial });
-    return { ok: true };
+    await act(device, ['input', 'text', text]);
+    return { ok: true, length: text.length };
   },
 
   async back(device) {
-    const serial = device?.meta?.deviceId;
-    
-    if (!serial) {
-      throw new Error('Device serial not found. Make sure the device is properly registered with a valid deviceId.');
-    }
-    
-    await adb('shell input keyevent 4', { serial });
+    await act(device, ['input', 'keyevent', '4']);
     return { ok: true };
   },
 
   async home(device) {
-    const serial = device?.meta?.deviceId;
-    
-    if (!serial) {
-      throw new Error('Device serial not found. Make sure the device is properly registered with a valid deviceId.');
-    }
-    
-    await adb('shell input keyevent 3', { serial });
+    await act(device, ['input', 'keyevent', '3']);
     return { ok: true };
   },
 
   async rotate(device, { orientation }) {
-    const serial = device?.meta?.deviceId;
-    
-    if (!serial) {
-      throw new Error('Device serial not found. Make sure the device is properly registered with a valid deviceId.');
-    }
-    
-    // Best-effort: disable auto-rotate and set user rotation
-    if (orientation === 'portrait') {
-      await adb('shell settings put system accelerometer_rotation 0', { serial });
-      await adb('shell settings put system user_rotation 0', { serial });
-    } else if (orientation === 'landscape') {
-      await adb('shell settings put system accelerometer_rotation 0', { serial });
-      await adb('shell settings put system user_rotation 1', { serial });
-    }
+    const serial = serialOf(device);
+    await shell(serial, ['settings', 'put', 'system', 'accelerometer_rotation', '0']);
+    await shell(serial, ['settings', 'put', 'system', 'user_rotation', orientation === 'landscape' ? '1' : '0']);
+    ui.invalidate(serial);
     return { ok: true, orientation };
   },
 
+  /**
+   * Current foreground package/activity plus a structured view of the screen.
+   */
   async getCurrentPageInfo(device) {
-    const serial = device?.meta?.deviceId;
-    
-    if (!serial) {
-      throw new Error('Device serial not found. Make sure the device is properly registered with a valid deviceId.');
+    const serial = serialOf(device);
+
+    let packageName = null;
+    let activityName = null;
+
+    // `dumpsys activity activities` is stable across API levels; the previous
+    // code piped through grep, which exits 1 when nothing matches and made adb
+    // report a failure for a perfectly normal screen.
+    const dump = await shell(serial, ['dumpsys', 'activity', 'activities'], { check: false });
+    const focus = /mResumedActivity: ActivityRecord\{[^ ]+ [^ ]+ ([^/]+)\/([^ }]+)/.exec(dump)
+      || /mCurrentFocus=Window\{[^ ]+ [^ ]+ ([^/]+)\/([^ }]+)/.exec(dump);
+
+    if (focus) {
+      packageName = focus[1];
+      activityName = focus[2];
+    } else {
+      const windows = await shell(serial, ['dumpsys', 'window'], { check: false });
+      const win = /mCurrentFocus=Window\{[^ ]+ [^ ]+ ([^/\s}]+)(?:\/([^\s}]+))?/.exec(windows);
+      if (win) {
+        packageName = win[1];
+        activityName = win[2] || null;
+      }
     }
+
+    const page = {
+      textElements: [],
+      contentDescriptions: [],
+      clickableElements: [],
+      inputFields: [],
+      buttons: [],
+      error: null,
+    };
 
     try {
-      // Method 1: Try to get current app using dumpsys window
-      let currentApp = '';
-      try {
-        const result = await adb("shell dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp'", { serial });
-        currentApp = result;
-      } catch (e) {
-        // Method 2: Fallback to dumpsys activity
-        try {
-          const result = await adb("shell dumpsys activity top | grep 'ACTIVITY'", { serial });
-          currentApp = result;
-        } catch (e2) {
-          // Method 3: Last fallback to ps
-          try {
-            const result = await adb("shell ps | grep -E 'u0_a[0-9]+' | head -1", { serial });
-            currentApp = result;
-          } catch (e3) {
-            throw new Error('Unable to determine current app');
+      // Parsed with fast-xml-parser rather than regex over the raw XML, so
+      // attribute values containing quotes or '>' no longer corrupt results.
+      const nodes = await ui.nodes(serial, { fresh: true });
+      const seen = { text: new Set(), desc: new Set(), click: new Set(), button: new Set() };
+
+      for (const node of nodes) {
+        const text = (node.text || '').trim();
+        const desc = (node['content-desc'] || '').trim();
+        const cls = node.class || '';
+        const bounds = ui.parseBounds(node.bounds);
+
+        if (text) seen.text.add(text);
+        if (desc) seen.desc.add(desc);
+
+        if (node.clickable === 'true' && (text || desc)) {
+          const label = text || desc;
+          if (!seen.click.has(label)) {
+            seen.click.add(label);
+            page.clickableElements.push({ label, class: cls, bounds });
+          }
+        }
+
+        if (cls === 'android.widget.EditText') {
+          page.inputFields.push({
+            text,
+            hint: node.hint || null,
+            focused: node.focused === 'true',
+            bounds,
+          });
+        }
+
+        if ((cls.endsWith('Button') || node.class === 'android.widget.Button') && (text || desc)) {
+          const label = text || desc;
+          if (!seen.button.has(label)) {
+            seen.button.add(label);
+            page.buttons.push({ label, bounds });
           }
         }
       }
-      
-      // Parse current app info
-      let packageName = null;
-      let activityName = null;
-      
-      // Try multiple parsing patterns
-      const appMatch = currentApp.match(/mCurrentFocus=Window{[^}]+([^}]+)}/);
-      const focusMatch = currentApp.match(/mFocusedApp=ActivityRecord{[^}]+([^}]+)}/);
-      const activityMatch = currentApp.match(/ACTIVITY\s+([^\s]+)\s+/);
-      const psMatch = currentApp.match(/([^\s]+)\s+([^\s]+)/);
-      
-      if (appMatch && appMatch[1]) {
-        const appInfo = appMatch[1].trim();
-        const parts = appInfo.split('/');
-        packageName = parts[0];
-        activityName = parts[1] || null;
-      } else if (focusMatch && focusMatch[1]) {
-        const appInfo = focusMatch[1].trim();
-        const parts = appInfo.split('/');
-        packageName = parts[0];
-        activityName = parts[1] || null;
-      } else if (activityMatch && activityMatch[1]) {
-        const appInfo = activityMatch[1].trim();
-        const parts = appInfo.split('/');
-        packageName = parts[0];
-        activityName = parts[1] || null;
-      } else if (psMatch && psMatch[1]) {
-        packageName = psMatch[1];
-        activityName = null;
-      }
 
-      // Get UI hierarchy to extract text elements and messages
-      let uiContent = {
-        textElements: [],
-        contentDescriptions: [],
-        clickableElements: [],
-        inputFields: [],
-        buttons: []
-      };
-      
-      try {
-        const deviceDumpFile = `/sdcard/ui_dump_${Date.now()}.xml`;
-        const localDumpFile = `/tmp/ui_dump_${Date.now()}.xml`;
-        
-        // Dump UI hierarchy
-        await adb(`shell uiautomator dump ${deviceDumpFile}`, { serial });
-        await adb(`pull ${deviceDumpFile} ${localDumpFile}`, { serial });
-        
-        // Read and parse UI dump
-        const fs = require('fs');
-        const xmlContent = fs.readFileSync(localDumpFile, 'utf8');
-        
-        // Extract text elements from XML
-        const textMatches = xmlContent.match(/text="([^"]*)"/g) || [];
-        const contentDescMatches = xmlContent.match(/content-desc="([^"]*)"/g) || [];
-        
-        uiContent.textElements = textMatches
-          .map(match => match.replace(/text="/, '').replace(/"$/, ''))
-          .filter(text => text && text.trim().length > 0);
-        
-        uiContent.contentDescriptions = contentDescMatches
-          .map(match => match.replace(/content-desc="/, '').replace(/"$/, ''))
-          .filter(desc => desc && desc.trim().length > 0);
-        
-        // Get clickable elements
-        const clickableMatches = xmlContent.match(/<node[^>]*clickable="true"[^>]*text="([^"]*)"[^>]*>/g) || [];
-        uiContent.clickableElements = clickableMatches.map(match => {
-          const textMatch = match.match(/text="([^"]*)"/);
-          return textMatch ? textMatch[1] : '';
-        }).filter(text => text && text.trim().length > 0);
-        
-        // Get input fields
-        const inputMatches = xmlContent.match(/<node[^>]*class="android.widget.EditText"[^>]*text="([^"]*)"[^>]*>/g) || [];
-        uiContent.inputFields = inputMatches.map(match => {
-          const textMatch = match.match(/text="([^"]*)"/);
-          return textMatch ? textMatch[1] : '';
-        });
-        
-        // Get buttons
-        const buttonMatches = xmlContent.match(/<node[^>]*class="android.widget.Button"[^>]*text="([^"]*)"[^>]*>/g) || [];
-        uiContent.buttons = buttonMatches.map(match => {
-          const textMatch = match.match(/text="([^"]*)"/);
-          return textMatch ? textMatch[1] : '';
-        }).filter(text => text && text.trim().length > 0);
-        
-        // Clean up temp files
-        await adb(`shell rm ${deviceDumpFile}`, { serial });
-        fs.unlinkSync(localDumpFile);
-        
-      } catch (dumpError) {
-        // UI dump failed, but we still have app info
-        uiContent.error = 'UI dump failed: ' + dumpError.message;
-      }
-      
-      // Get app label if possible
-      let appLabel = packageName;
-      if (packageName) {
-        try {
-          const { stdout: appInfo } = await adb(`shell pm list packages -f | grep ${packageName}`, { serial});
-          if (appInfo) {
-            const labelMatch = appInfo.match(/=([^=]+)$/);
-            if (labelMatch) {
-              appLabel = labelMatch[1];
-            }
-          }
-        } catch (e) {
-          // Ignore if we can't get app label
-        }
-      }
-      
-      return {
-        ok: true,
-        currentApp: {
-          packageName,
-          activityName,
-          appLabel
-        },
-        pageContent: {
-          textElements: [...new Set(uiContent.textElements)],
-          contentDescriptions: [...new Set(uiContent.contentDescriptions)],
-          clickableElements: [...new Set(uiContent.clickableElements)],
-          inputFields: [...new Set(uiContent.inputFields)],
-          buttons: [...new Set(uiContent.buttons)],
-          error: uiContent.error || null
-        },
-        timestamp: new Date().toISOString()
-      };
-      
-    } catch (error) {
-      throw new Error(`Failed to get current page info: ${error.message}`);
+      page.textElements = [...seen.text];
+      page.contentDescriptions = [...seen.desc];
+    } catch (e) {
+      page.error = `UI dump failed: ${e.message}`;
     }
-  },
 
-  async setGPS(device, { lat, lon, speed = 0, bearing = 0 }) {
-    const serial = device?.meta?.deviceId;
-    
-    // Set the location using geo fix
-    await adb(`emu geo fix ${lon} ${lat}`, { serial });
-    
-    // If speed or bearing is provided, also set them using NMEA sentence
-    if (speed > 0 || bearing > 0) {
-      // Convert bearing to 0-360 range
-      const normalizedBearing = ((bearing % 360) + 360) % 360;
-      
-      // Convert speed from m/s to knots (1 m/s = 1.94384 knots)
-      const speedKnots = speed * 1.94384;
-      
-      // Format: $GPRMC,time,status,lat,N,lon,E,spd,cog,date,mv,mvE,mode*cs
-      // For simplicity, we're using a fixed time and date
-      const nmea = `$GPRMC,120000,A,${Math.abs(lat).toFixed(6)},${lat >= 0 ? 'N' : 'S'},` +
-                  `${Math.abs(lon).toFixed(6)},${lon >= 0 ? 'E' : 'W'},` +
-                  `${speedKnots.toFixed(2)},${normalizedBearing.toFixed(2)},191222,,,A*`;
-      
-      // Calculate checksum (XOR of all characters between $ and *)
-      let checksum = 0;
-      for (let i = 1; i < nmea.length - 1; i++) {
-        checksum ^= nmea.charCodeAt(i);
-      }
-      
-      const nmeaWithChecksum = `${nmea}${checksum.toString(16).toUpperCase().padStart(2, '0')}`;
-      
-      // Send the NMEA sentence to the emulator
-      await adb(`emu geo nmea ${nmeaWithChecksum}`, { serial });
-    }
-    
-    return { ok: true };
-  },
-
-  async clickByText(device, { text, exact = true, index = 0, skipDialogCheck = false }) {
-    const serial = device?.meta?.deviceId;
-    const dumpFile = `/sdcard/window_dump_${serial}.xml`;
-    
-    try {
-      // Skip dialog check if requested (to prevent infinite loops)
-      if (!skipDialogCheck) {
-        const { handleSystemDialogs } = require('../utils/dialogHandler');
-        await handleSystemDialogs(serial);
-      }
-      
-      // Dump the UI hierarchy to XML
-      await adb(`shell uiautomator dump ${dumpFile}`, { serial });
-      const xmlDump = await adb(`shell cat ${dumpFile}`, { serial });
-      
-      // Parse the XML to find elements with the target text
-      const { parseString } = require('xml2js');
-      const parsed = await new Promise((resolve, reject) => {
-        parseString(xmlDump, (err, result) => {
-          if (err) reject(err);
-          else resolve(result);
-        });
-      });
-      
-      // Find all nodes with the text
-      const findNodes = (node, text, nodes = []) => {
-        if (node.$ && node.$.text) {
-          const nodeText = exact 
-            ? node.$.text 
-            : node.$.text.toLowerCase();
-          const searchText = exact 
-            ? text 
-            : text.toLowerCase();
-            
-          if (exact ? nodeText === searchText : nodeText.includes(searchText)) {
-            nodes.push(node);
-          }
-        }
-        
-        if (node.node) {
-          const children = Array.isArray(node.node) ? node.node : [node.node];
-          children.forEach(child => findNodes(child, text, nodes));
-        }
-        
-        return nodes;
-      };
-      console.log(parsed)
-      const matchingNodes = findNodes(parsed.hierarchy, text);
-      
-      if (matchingNodes.length === 0) {
-        throw new Error(`No elements found with text: ${text}`);
-      }
-      
-      if (index >= matchingNodes.length) {
-        throw new Error(`Index ${index} out of bounds. Found ${matchingNodes.length} matching elements.`);
-      }
-      
-      // Get bounds of the element
-      const bounds = matchingNodes[index].$.bounds;
-      const match = bounds.match(/\[(\d+),(\d+)\]\[(\d+),(\d+)\]/);
-      
-      if (!match) {
-        throw new Error(`Could not parse bounds: ${bounds}`);
-      }
-      
-      const x1 = parseInt(match[1], 10);
-      const y1 = parseInt(match[2], 10);
-      const x2 = parseInt(match[3], 10);
-      const y2 = parseInt(match[4], 10);
-      
-      // Calculate center point
-      const centerX = Math.floor((x1 + x2) / 2);
-      const centerY = Math.floor((y1 + y2) / 2);
-      
-      // Click the center of the element
-      await adb(`shell input tap ${centerX} ${centerY}`, { serial });
-      
-      return { ok: true, x: centerX, y: centerY };
-      
-    } finally {
-    }
-    
-    // Tap on the center of the element
-    await this.tap(device, { x: centerX, y: centerY });
-    
-    return { 
-      count: matchingNodes.length,
-      bounds: { x1, y1, x2, y2 }
+    return {
+      ok: true,
+      currentApp: { packageName, activityName },
+      pageContent: page,
+      timestamp: new Date().toISOString(),
     };
   },
 
-  async screenshotStream(device) {
-    const execAsync = promisify(exec);
-    
-    const serial = device?.meta?.deviceId;
-    if (!serial) {
-      throw new Error('Device serial number is required for taking screenshots');
+  async setGPS(device, { lat, lon, speed = 0, bearing = 0 }) {
+    const serial = serialOf(device);
+    // `emu` is a console command, not a shell command — it must not be quoted
+    // for the device shell.
+    await adbText(serial, ['emu', 'geo', 'fix', String(lon), String(lat)]);
+
+    if (speed > 0 || bearing > 0) {
+      const normalizedBearing = ((bearing % 360) + 360) % 360;
+      const speedKnots = speed * 1.94384;
+
+      // NMEA needs ddmm.mmmm, not decimal degrees — the old code sent decimal
+      // degrees, so any consumer parsing the sentence read the wrong position.
+      const toNmea = (value, degreeDigits) => {
+        const abs = Math.abs(value);
+        const degrees = Math.floor(abs);
+        const minutes = (abs - degrees) * 60;
+        return `${String(degrees).padStart(degreeDigits, '0')}${minutes.toFixed(4).padStart(7, '0')}`;
+      };
+
+      const now = new Date();
+      const hhmmss = `${String(now.getUTCHours()).padStart(2, '0')}${String(now.getUTCMinutes()).padStart(2, '0')}${String(now.getUTCSeconds()).padStart(2, '0')}`;
+      const ddmmyy = `${String(now.getUTCDate()).padStart(2, '0')}${String(now.getUTCMonth() + 1).padStart(2, '0')}${String(now.getUTCFullYear() % 100).padStart(2, '0')}`;
+
+      const body = `GPRMC,${hhmmss},A,${toNmea(lat, 2)},${lat >= 0 ? 'N' : 'S'},`
+        + `${toNmea(lon, 3)},${lon >= 0 ? 'E' : 'W'},`
+        + `${speedKnots.toFixed(2)},${normalizedBearing.toFixed(2)},${ddmmyy},,,A`;
+
+      let checksum = 0;
+      for (let i = 0; i < body.length; i += 1) checksum ^= body.charCodeAt(i);
+
+      const sentence = `$${body}*${checksum.toString(16).toUpperCase().padStart(2, '0')}`;
+      await adbText(serial, ['emu', 'geo', 'nmea', sentence], { check: false });
     }
 
-    // Add a small delay to ensure the screen is fully rendered
-    await new Promise(resolve => setTimeout(resolve, 500));
-    
-    const command = `adb -s ${serial} exec-out screencap -p`;
-    console.log(`[screenshot] Taking screenshot from device: ${serial}`);
-    
-    try {
-      // First, try the direct method
-      const { stdout, stderr } = await execAsync(command, { 
-        encoding: 'buffer',
-        maxBuffer: 10 * 1024 * 1024 // 10MB buffer
-      });
-      
-      if (!stdout || stdout.length === 0) {
-        throw new Error('Received empty screenshot data');
-      }
-      
-      console.log(`[screenshot] Captured ${stdout.length} bytes of screenshot data`);
-      
-      // Create a stream from the buffer
-      const { Readable } = require('stream');
-      const stream = new Readable();
-      stream.push(stdout);
-      stream.push(null); // Signal end of stream
-      
-      return stream;
-      
-    } catch (error) {
-      console.error('[screenshot] Error capturing screenshot:', error);
-      
-      // If direct method fails, try saving to a temporary file first
-      try {
-        console.log('[screenshot] Trying alternative method with temporary file...');
-        const tempFile = `/sdcard/screenshot-${Date.now()}.png`;
-        
-        // Save screenshot to device
-        await execAsync(`adb -s ${serial} shell screencap -p ${tempFile}`);
-        
-        // Pull the file
-        await execAsync(`adb -s ${serial} pull ${tempFile} /tmp/`);
-        
-        // Read the file
-        const fs = require('fs');
-        const filePath = `/tmp/screenshot-${Date.now()}.png`;
-        const fileStream = fs.createReadStream(filePath);
-        
-        // Clean up
-        fileStream.on('end', () => {
-          fs.unlink(filePath, () => {});
-          execAsync(`adb -s ${serial} shell rm ${tempFile}`).catch(() => {});
-        });
-        
-        return fileStream;
-        
-      } catch (fallbackError) {
-        console.error('[screenshot] Fallback method also failed:', fallbackError);
-        throw new Error(`Failed to capture screenshot: ${fallbackError.message}`);
-      }
+    return { ok: true, lat, lon };
+  },
+
+  /**
+   * Tap the element matching `text`.
+   *
+   * Matching is tolerant (case, whitespace, NBSP) and searches text,
+   * content-desc, resource-id and hint. Candidates are ranked rather than
+   * taken in document order, the tap lands on the nearest clickable ancestor,
+   * and the element is waited for — and scrolled to — before giving up.
+   *
+   * @param {object} query {text, exact, index, field, className}
+   * @param {object} opts  {timeoutMs, scroll, maxScrolls, requireVisible, verify}
+   */
+  async clickByText(device, query, opts = {}) {
+    const serial = serialOf(device);
+    return finder.clickByText(serial, query, opts);
+  },
+
+  /** Wait for an element to appear without tapping it. */
+  async waitForText(device, query, opts = {}) {
+    const serial = serialOf(device);
+    const { match, candidates, scrolls, attempts } = await finder.waitFor(serial, query, opts);
+    return {
+      ok: true,
+      found: {
+        text: match.node.text || null,
+        contentDesc: match.node['content-desc'] || null,
+        resourceId: match.node['resource-id'] || null,
+        class: match.node.class || null,
+        bounds: match.bounds,
+        score: match.score,
+      },
+      matches: candidates.length,
+      scrolls,
+      attempts,
+    };
+  },
+
+  /** All elements matching a query, ranked — useful for debugging selectors. */
+  async findElements(device, query) {
+    const serial = serialOf(device);
+    const nodes = await ui.nodes(serial, { fresh: true });
+    return {
+      ok: true,
+      elements: finder.rank(nodes, query).map((r) => ({
+        text: r.node.text || null,
+        contentDesc: r.node['content-desc'] || null,
+        resourceId: r.node['resource-id'] || null,
+        class: r.node.class || null,
+        clickable: r.target.clickable === 'true',
+        visible: r.visible,
+        score: r.score,
+        bounds: r.bounds,
+      })),
+    };
+  },
+
+  /** Focus a field by its label/hint and type into it. */
+  async typeInto(device, { text, value, clear = true, ...query }, opts = {}) {
+    const serial = serialOf(device);
+
+    await finder.clickByText(serial, { ...query, text }, { ...opts, verify: false });
+    if (clear) {
+      // Move to end, then delete backwards — `input keyevent 123` is END.
+      await shell(serial, ['input', 'keyevent', '123']);
+      await shell(serial, ['input', 'keyevent', '--longpress', ...Array(64).fill('67')], { check: false });
     }
+    await shell(serial, ['input', 'text', value]);
+    ui.invalidate(serial);
+    return { ok: true, value };
+  },
+
+  /** Raw PNG bytes of the current screen. */
+  async screenshot(device) {
+    const serial = serialOf(device);
+    const png = await adbBuffer(serial, ['exec-out', 'screencap', '-p']);
+    if (!png.length) {
+      const e = new Error('screencap returned no data');
+      e.status = 503;
+      throw e;
+    }
+    return png;
+  },
+
+  /** Cheap liveness probe used before expensive work. */
+  async isBooted(device) {
+    const serial = serialOf(device);
+    return (await getProp(serial, 'sys.boot_completed')) === '1';
   },
 };

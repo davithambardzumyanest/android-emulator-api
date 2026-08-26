@@ -1,589 +1,227 @@
+// Device registry operations. Emulator lifecycle lives in emulatorService.
 const deviceManager = require('../devices/deviceManager');
-const {spawn} = require('child_process');
-const {v4: uuidv4} = require('uuid');
+const emulatorService = require('./emulatorService');
+const avdConfig = require('../devices/avdConfig');
+const profiles = require('../devices/profiles');
+const config = require('../config');
 const logger = require('../logger');
-const fs = require('fs');
-const path = require('path');
-const { handleSystemDialogs } = require('../utils/dialogHandler');
+const { adbText, shell, getProp, listEmulators } = require('../utils/adb');
 
-// One-time wipe flag to ensure next emulator start uses a clean data partition
-const wipeFlagPath = path.join(__dirname, '../../.state');
-const wipeFlagFile = path.join(wipeFlagPath, 'wipe-once.flag');
-
-// Normalize proxy string for emulator flag (-http-proxy) which is more reliable with host:port
-function normalizeProxyForEmulator(p) {
-    if (!p) return null;
-    try {
-        const u = new URL(p);
-        // If credentials or explicit scheme provided, pass through as-is (emulator supports full URL with auth)
-        if (u.username || u.password || /:^https?:$/.test(u.protocol)) {
-            return p;
-        }
-        const host = u.hostname;
-        const port = u.port ? Number(u.port) : (u.protocol === 'https:' ? 443 : 80);
-        return `${host}:${port}`;
-    } catch (_) {
-        // allow host:port format directly
-        return String(p);
-    }
-}
-
-function setWipeOnceFlag() {
-    try {
-        fs.mkdirSync(wipeFlagPath, {recursive: true});
-        fs.writeFileSync(wipeFlagFile, String(Date.now()));
-    } catch (_) { /* ignore */
-    }
-}
-
-function consumeWipeOnceFlag() {
-    try {
-        if (fs.existsSync(wipeFlagFile)) {
-            fs.unlinkSync(wipeFlagFile);
-            return true;
-        }
-    } catch (_) { /* ignore */
-    }
-    return false;
+/** Parse a proxy into host/port. */
+function parseProxy(value) {
+  try {
+    const url = new URL(value);
+    return {
+      host: url.hostname,
+      port: Number(url.port) || (url.protocol === 'https:' ? 443 : 80),
+    };
+  } catch (_) {
+    const m = /^([^:]+):(\d+)$/.exec(String(value));
+    if (m) return { host: m[1], port: Number(m[2]) };
+    const e = new Error(`Invalid proxy '${value}'; expected a URL or host:port`);
+    e.status = 400;
+    throw e;
+  }
 }
 
 const deviceService = {
-    async register(payload) {
-        const {platform, proxy, meta = {}, avd} = payload || {};
+  /**
+   * Register a device, booting an emulator when one is not supplied.
+   * Unlike the previous version this waits for the emulator to finish booting,
+   * so the device is usable the moment this resolves.
+   */
+  async register(payload = {}) {
+    const { platform, proxy, meta = {}, avd, profile, wipe } = payload;
 
-        if (!platform || !['android', 'ios'].includes(platform)) {
-            const e = new Error("'platform' must be 'android' or 'ios'");
-            e.status = 400;
-            throw e;
-        }
+    if (!['android', 'ios'].includes(platform)) {
+      const e = new Error("'platform' must be 'android' or 'ios'");
+      e.status = 400;
+      throw e;
+    }
 
-        // If it's an Android device and no deviceId is provided, create an emulator
-        if (platform === 'android' && !meta.deviceId) {
-            const emulatorName = `emulator-${uuidv4().substring(0, 8)}`;
-            const port = 5555 + (Math.floor(Math.random() * 16) * 2); // Random odd port between 5555-5585
+    if (platform === 'android' && !meta.deviceId) {
+      const started = await emulatorService.start({ avd, proxy, profile, wipe });
+      meta.deviceId = started.serial;
+      meta.emulator = {
+        avd: started.avd,
+        serial: started.serial,
+        port: started.port,
+        pid: started.pid,
+        bootMs: started.bootMs,
+        command: started.command,
+      };
+      meta.profile = started.profile;
+    }
 
-            // Create AVD (Android Virtual Device)
-            // await this.executeCommand('avdmanager', [
-            //   'create', 'avd',
-            //   '-n', emulatorName,
-            //   '-k', 'system-images;android-33;google_apis;x86_64',
-            //   '--force'
-            // ]);
+    if (platform === 'android' && meta.deviceId) {
+      // Reflect what the guest actually reports, so callers can verify the
+      // device presents itself the way the profile intended.
+      meta.identity = await this.identity(meta.deviceId).catch(() => null);
+    }
 
-            // Start the emulator
-            const emulatorProcess = await this.startEmulator(avd, port, proxy);
+    const device = deviceManager.register({ platform, proxy, meta });
 
-            // Update meta with emulator details
-            meta.emulator = {
-                name: emulatorName,
-                port,
-                pid: emulatorProcess.pid,
-                command: emulatorProcess.spawnargs.join(' ')
-            };
-            meta.deviceId = `emulator-${port}`;
-        }
+    if (platform === 'android' && proxy) {
+      try {
+        await this.applyProxy(device.id, proxy);
+      } catch (e) {
+        logger.warn({ deviceId: device.id, err: e.message }, 'applyProxy on register failed');
+      }
+    }
 
-        const device = deviceManager.register({platform, proxy, meta});
+    return device;
+  },
 
-        // Best-effort: apply Android proxy if provided
-        if (platform === 'android' && proxy) {
-            try {
-                await this.applyProxy(device.id, proxy);
-            } catch (e) {
-                logger.warn(`applyProxy on register failed: ${e.message}`);
-            }
-        }
+  /** What the guest reports about itself. */
+  async identity(serial) {
+    const props = [
+      'ro.product.manufacturer',
+      'ro.product.model',
+      'ro.product.brand',
+      'ro.product.device',
+      'ro.build.version.release',
+      'ro.build.version.sdk',
+      'ro.build.fingerprint',
+    ];
+    const values = await Promise.all(props.map((name) => getProp(serial, name)));
+    const identity = Object.fromEntries(props.map((name, i) => [name, values[i]]));
 
-        return device;
-    },
+    const size = await shell(serial, ['wm', 'size'], { check: false });
+    const density = await shell(serial, ['wm', 'density'], { check: false });
+    identity.screen = /(\d+)x(\d+)/.exec(size)?.[0] || null;
+    identity.density = /(\d+)/.exec(density)?.[0] || null;
 
-    executeCommand(command, args = []) {
-        return new Promise((resolve, reject) => {
-            const cmd = spawn(command, args, {stdio: 'pipe'});
-            let output = '';
-            let error = '';
+    return identity;
+  },
 
-            cmd.stdout.on('data', (data) => {
-                output += data.toString();
-                logger.debug(`[${command}] ${data}`.trim());
-            });
+  list() {
+    return deviceManager.list();
+  },
 
-            cmd.stderr.on('data', (data) => {
-                error += data.toString();
-                logger.error(`[${command} ERROR] ${data}`.trim());
-            });
+  getOrThrow(id) {
+    return deviceManager.ensure(id);
+  },
 
-            cmd.on('close', (code) => {
-                if (code === 0) {
-                    resolve({output, error});
-                } else {
-                    reject(new Error(`Command failed with code ${code}: ${error || 'Unknown error'}`));
-                }
-            });
-        });
-    },
-    /**
-     * Apply or clear Android global HTTP proxy on device.
-     * Accepts URL (http/https) or host:port.
-     */
-    async applyProxy(id, proxyUrl) {
-        // If falsy, clear proxy settings
-        if (!proxyUrl || String(proxyUrl).trim() === '') {
-            try {
-                await this.executeAdb(id, ['shell', 'settings', 'put', 'global', 'http_proxy', ':0']);
-            } catch (_) {
-            }
-            try {
-                await this.executeAdb(id, ['shell', 'settings', 'delete', 'global', 'global_http_proxy_host']);
-            } catch (_) {
-            }
-            try {
-                await this.executeAdb(id, ['shell', 'settings', 'delete', 'global', 'global_http_proxy_port']);
-            } catch (_) {
-            }
-            try {
-                await this.executeAdb(id, ['shell', 'settings', 'put', 'global', 'global_http_proxy_exclusion_list', '']);
-            } catch (_) {
-            }
-            return {cleared: true};
-        }
+  /** Stop the emulator behind a device and drop it from the registry. */
+  async unregister(id) {
+    const device = deviceManager.ensure(id);
+    const serial = device.meta?.deviceId;
+    let stopped = null;
+    if (serial) stopped = await emulatorService.stop(serial);
+    deviceManager.remove(id);
+    return { ok: true, deviceId: id, stopped };
+  },
 
-        function parse(u) {
-            try {
-                const parsed = new URL(u);
-                const host = parsed.hostname;
-                const port = parsed.port ? Number(parsed.port) : (parsed.protocol === 'https:' ? 443 : 80);
-                return {host, port};
-            } catch (_) {
-                const m = String(u).match(/^([^:]+):(\d+)$/);
-                if (m) return {host: m[1], port: Number(m[2])};
-                const e = new Error('Invalid proxy URL');
-                e.status = 400;
-                throw e;
-            }
-        }
+  /** Set or clear the guest's global HTTP proxy. */
+  async applyProxy(id, proxyUrl) {
+    const device = deviceManager.ensure(id);
+    const serial = device.meta?.deviceId;
+    if (!serial) {
+      const e = new Error('Emulator serial not found for device');
+      e.status = 400;
+      throw e;
+    }
 
-        const {host, port} = parse(proxyUrl);
-        const hostPort = `${host}:${port}`;
-        await this.executeAdb(id, ['shell', 'settings', 'put', 'global', 'http_proxy', hostPort]);
-        await this.executeAdb(id, ['shell', 'settings', 'put', 'global', 'global_http_proxy_host', host]);
-        await this.executeAdb(id, ['shell', 'settings', 'put', 'global', 'global_http_proxy_port', String(port)]);
-        // Ensure no exclusion list blocks traffic
-        try {
-            await this.executeAdb(id, ['shell', 'settings', 'put', 'global', 'global_http_proxy_exclusion_list', '']);
-        } catch (_) {
-        }
-        return {applied: true, host, port};
-    },
+    if (!proxyUrl || String(proxyUrl).trim() === '') {
+      await shell(serial, ['settings', 'put', 'global', 'http_proxy', ':0'], { check: false });
+      await shell(serial, ['settings', 'delete', 'global', 'global_http_proxy_host'], { check: false });
+      await shell(serial, ['settings', 'delete', 'global', 'global_http_proxy_port'], { check: false });
+      await shell(serial, ['settings', 'put', 'global', 'global_http_proxy_exclusion_list', ''], { check: false });
+      deviceManager.update(id, { proxy: null });
+      return { cleared: true };
+    }
 
-    async startEmulator(avdName, port, proxy) {
-        const gpu = String(process.env.EMULATOR_GPU || 'auto').trim() || 'auto';
+    const { host, port } = parseProxy(proxyUrl);
+    await shell(serial, ['settings', 'put', 'global', 'http_proxy', `${host}:${port}`]);
+    await shell(serial, ['settings', 'put', 'global', 'global_http_proxy_host', host]);
+    await shell(serial, ['settings', 'put', 'global', 'global_http_proxy_port', String(port)]);
+    await shell(serial, ['settings', 'put', 'global', 'global_http_proxy_exclusion_list', ''], { check: false });
 
-        const args = [
-            '-avd', avdName,
-            '-port', String(port),
+    deviceManager.update(id, { proxy: proxyUrl });
+    return { applied: true, host, port };
+  },
 
-            // KVM acceleration
-            '-accel', 'on',
+  /**
+   * Update the stored proxy and apply it.
+   * The old version fired applyProxy into a floating async IIFE and returned
+   * before it ran, so failures surfaced nowhere and callers saw success.
+   */
+  async updateProxy(id, proxy) {
+    if (proxy === undefined) {
+      const e = new Error("'proxy' is required (pass null or '' to clear)");
+      e.status = 400;
+      throw e;
+    }
+    const result = await this.applyProxy(id, proxy);
+    return { device: deviceManager.ensure(id), ...result };
+  },
 
-            '-no-snapshot', '-no-snapshot-save',        // don’t use snapshots, ensures clean boot
-            '-no-audio',           // disable audio for headless
-            '-no-boot-anim',       // skip boot animation for faster start
-            '-gpu', gpu,           // configurable GPU mode: auto, host, swiftshader, etc.
-            '-memory', '4096',     // increase RAM to 8GB for stability
-            '-cores', '4',         // increase CPU cores if server allows
-            '-netfast',            // optimize network emulation
-            '-wipe-data',          // optional: ensures fresh emulator state
-            // '-verbose',            // logs more info, useful for debugging
-            '-read-only',           // optional if you plan multiple instances of the same AVD
-            '-camera-back', 'none',
-            '-camera-front', 'none'
-        ];
+  /**
+   * Run an adb subcommand against a device.
+   * @param {string} id device uuid
+   * @param {string|string[]} command argv, or a string split on whitespace
+   */
+  async executeAdb(id, command) {
+    const device = deviceManager.ensure(id);
+    const serial = device.meta?.deviceId
+      || (device.meta?.emulator?.port ? `emulator-${device.meta.emulator.port}` : null);
 
-        // Headless mode via env
-        const headless = String(process.env.EMULATOR_HEADLESS || '').toLowerCase() === 'true';
-        if (headless) {
-            args.push('-no-window');
-        }
+    if (!serial) {
+      const e = new Error('Emulator serial not found for device');
+      e.status = 400;
+      throw e;
+    }
 
-        // If cleanup requested a fresh device, wipe data on next boot
-        if (consumeWipeOnceFlag()) {
-            args.push('-wipe-data');
-        }
+    const parts = Array.isArray(command)
+      ? command
+      : String(command || '').trim().split(/\s+/).filter(Boolean);
 
-        if (proxy) {
-            const norm = normalizeProxyForEmulator(proxy);
-            args.push('-http-proxy', norm);
-            // Set public DNS to avoid corporate DNS blocking when using proxy
-            args.push('-dns-server', process.env.EMULATOR_DNS || '8.8.8.8,1.1.1.1');
-            logger.info(`[Emulator ${avdName}] using proxy ${norm} with DNS ${process.env.EMULATOR_DNS || '8.8.8.8,1.1.1.1'}`);
-        }
+    if (parts.length === 0) {
+      const e = new Error("'command' is required");
+      e.status = 400;
+      throw e;
+    }
 
-        // Launch emulator directly with logs to console for debugging
-        const emulatorProcess = spawn('emulator', args, {
-            stdio: 'inherit', // pipe to parent's stdio to see logs in console
-            shell: false,
-            env: {
-                ...process.env,                         // keep existing env
-                ANDROID_HOME: '/root/Android/Sdk',      // set correct SDK path
-                ANDROID_SDK_ROOT: '/root/Android/Sdk',
-                PATH: process.env.PATH
-                    + ':/root/Android/Sdk/emulator'
-                    + ':/root/Android/Sdk/platform-tools'
-                    + ':/root/Android/Sdk/tools'
-            }
-        });
+    // No implicit uiautomator dump here. The old code ran a full dialog scan
+    // before every adb call, adding seconds to every request.
+    const res = await adbText(serial, parts, { check: false });
+    return { stdout: res, stderr: '' };
+  },
 
-        // Log process exit
-        emulatorProcess.on('close', (code) => {
-            logger.info(`Emulator process exited with code ${code}`);
-        });
+  /** Available AVDs plus the profile each currently reports. */
+  listAvds() {
+    return avdConfig.list().map((name) => {
+      const cfg = avdConfig.read(name);
+      return {
+        avd: name,
+        screen: `${cfg['hw.lcd.width']}x${cfg['hw.lcd.height']}`,
+        density: cfg['hw.lcd.density'],
+        ramMb: cfg['hw.ramSize'],
+        image: cfg['image.sysdir.1'],
+        playStore: cfg['PlayStore.enabled'] === 'yes',
+      };
+    });
+  },
 
-        emulatorProcess.on('error', (err) => {
-            logger.error(`Failed to start emulator: ${err.message}`);
-        });
+  listProfiles() {
+    return profiles.list();
+  },
 
-        return emulatorProcess;
-    },
+  /** Apply a hardware profile to an AVD without booting it. */
+  applyProfile(avd, profile = config.device.profile) {
+    return avdConfig.applyProfile(avd, profile);
+  },
 
-    list() {
-        return deviceManager.list();
-    },
+  async runningEmulators() {
+    return listEmulators();
+  },
 
-    getOrThrow(id) {
-        const d = deviceManager.get(id);
-        if (!d) {
-            const e = new Error('Device not found');
-            e.status = 404;
-            throw e;
-        }
-        return d;
-    },
-
-    updateProxy(id, proxy) {
-        if (!proxy) {
-            const e = new Error("'proxy' is required");
-            e.status = 400;
-            throw e;
-        }
-        const updated = deviceManager.update(id, {proxy});
-        if (!updated) {
-            const e = new Error('Device not found');
-            e.status = 404;
-            throw e;
-        }
-        // Apply proxy on device (async, best-effort)
-        (async () => {
-            try {
-                await this.applyProxy(id, proxy);
-            } catch (e) {
-                logger.warn(`applyProxy on update failed: ${e.message}`);
-            }
-        })();
-        return updated;
-    },
-
-    /**
-     * Execute an adb command targeted at the correct emulator for a device UUID.
-     * @param {string} id Device UUID stored by deviceManager
-     * @param {string|string[]} command e.g. "shell pm grant com.pkg android.permission.ACCESS_FINE_LOCATION"
-     * @returns {Promise<{stdout: string, stderr: string}>}
-     */
-    async executeAdb(id, command) {
-        const device = this.getOrThrow(id);
-
-        const serial = device?.meta?.deviceId
-            || (device?.meta?.emulator?.port ? `emulator-${device.meta.emulator.port}` : null);
-
-        if (!serial) {
-            const e = new Error('Emulator serial not found for device');
-            e.status = 400;
-            throw e;
-        }
-
-        const parts = Array.isArray(command)
-            ? command
-            : String(command || '').trim().split(/\s+/).filter(Boolean);
-
-        if (parts.length === 0) {
-            const e = new Error("'command' is required");
-            e.status = 400;
-            throw e;
-        }
-        await handleSystemDialogs(serial)
-        const args = ['-s', serial, ...parts];
-        logger.debug(`Executing: adb ${args.join(' ')}`);
-
-        return new Promise((resolve, reject) => {
-            const proc = spawn('adb', args, {stdio: 'pipe'});
-            let stdout = '';
-            let stderr = '';
-
-            proc.stdout.on('data', (d) => {
-                stdout += d.toString();
-            });
-            proc.stderr.on('data', (d) => {
-                stderr += d.toString();
-            });
-            proc.on('error', (err) => {
-                reject(err);
-            });
-            proc.on('close', (code) => {
-                if (code === 0) {
-                    resolve({stdout: stdout.trim(), stderr: stderr.trim()});
-                } else {
-                    const err = new Error(`ADB command failed (${code}): ${stderr.trim() || 'Unknown error'}`);
-                    err.status = 500;
-                    err.stdout = stdout;
-                    err.stderr = stderr;
-                    reject(err);
-                }
-            });
-        });
-    },
-    /**
-     * Stop all emulators and clear device registry.
-     * For each Android device: try to disable animations, then stop emulator.
-     */
-    async stopAllEmulators() {
-        const devices = this.list();
-        const results = [];
-
-        for (const d of devices) {
-            if (d.platform !== 'android') continue;
-
-            const serial = d?.meta?.deviceId || (d?.meta?.emulator?.port ? `emulator-${d.meta.emulator.port}` : null);
-            const pid = d?.meta?.emulator?.pid;
-            const entry = {deviceId: d.id, serial, pid, stopped: false, errors: []};
-
-            // Best-effort: disable animations before shutdown (may fail if not booted)
-            if (serial) {
-                try {
-                    await this.executeAdb(d.id, ['shell', 'settings', 'put', 'global', 'window_animation_scale', '0']);
-                } catch (e) {
-                    entry.errors.push(`disable window_animation_scale: ${e.message}`);
-                }
-                try {
-                    await this.executeAdb(d.id, ['shell', 'settings', 'put', 'global', 'transition_animation_scale', '0']);
-                } catch (e) {
-                    entry.errors.push(`disable transition_animation_scale: ${e.message}`);
-                }
-                try {
-                    await this.executeAdb(d.id, ['shell', 'settings', 'put', 'global', 'animator_duration_scale', '0']);
-                } catch (e) {
-                    entry.errors.push(`disable animator_duration_scale: ${e.message}`);
-                }
-            }
-
-            // Try graceful shutdown first
-            if (serial) {
-                try {
-                    await this.executeAdb(d.id, ['emu', 'kill']);
-                    entry.stopped = true;
-                } catch (e) {
-                    entry.errors.push(`adb emu kill: ${e.message}`);
-                }
-            }
-
-            // Fallback: kill by PID
-            if (!entry.stopped && typeof pid === 'number') {
-                try {
-                    process.kill(pid, 'SIGKILL');
-                    entry.stopped = true;
-                } catch (e) {
-                    entry.errors.push(`kill ${pid}: ${e.message}`);
-                }
-            }
-
-            results.push(entry);
-        }
-
-        // Clear device registry
-        try {
-            deviceManager.clear();
-        } catch (_) {
-        }
-
-        return {results};
-    },
-    /**
-     * Cleanup all emulators and related processes system-wide.
-     * 1) Stop all known emulators from the registry (graceful, then force by PID)
-     * 2) Best-effort kill any leftover emulator/qemu processes
-     * 3) Kill adb server to release ports
-     */
-    async cleanupAll() {
-        const summary = {
-            stopResults: [],
-            adbEnumeratedKills: [],
-            processKills: [],
-            adbKill: null,
-            wipeNextStart: false,
-            deepClean: { avdPaths: [], tmpPaths: [], errors: [] }
-        };
-        try {
-            const stopped = await this.stopAllEmulators();
-            summary.stopResults = stopped.results || [];
-        } catch (e) {
-            summary.stopResults = [{error: `stopAllEmulators failed: ${e.message}`}];
-        }
-
-        // Helper to run a command and ignore failures
-        async function trySpawn(command, args) {
-            return new Promise((resolve) => {
-                const proc = spawn(command, args, {stdio: 'pipe'});
-                let stderr = '';
-                proc.stderr.on('data', (d) => {
-                    stderr += d.toString();
-                });
-                proc.on('close', (code) => {
-                    resolve({command: `${command} ${args.join(' ')}`, code, stderr: stderr.trim()});
-                });
-                proc.on('error', (err) => {
-                    resolve({command: `${command} ${args.join(' ')}`, code: -1, stderr: String(err?.message || err)});
-                });
-            });
-        }
-
-        // Enumerate any running emulators via adb and request graceful kill
-        const devicesList = await (async () => {
-            const res = await trySpawn('adb', ['devices']);
-            const out = (res.stderr ? '' : '') + '';
-            // We need stdout; re-run capturing stdout
-            return new Promise((resolve) => {
-                const proc = spawn('adb', ['devices'], {stdio: ['ignore', 'pipe', 'pipe']});
-                let stdout = '';
-                proc.stdout.on('data', (d) => {
-                    stdout += d.toString();
-                });
-                proc.on('close', () => resolve(stdout));
-                proc.on('error', () => resolve(''));
-            });
-        })();
-
-        const emulatorSerials = String(devicesList)
-            .split(/\r?\n/)
-            .map((l) => l.trim())
-            .filter((l) => /^emulator-\d+\s+device$/.test(l))
-            .map((l) => l.split(/\s+/)[0]);
-
-        for (const serial of emulatorSerials) {
-            // eslint-disable-next-line no-await-in-loop
-            const res = await trySpawn('adb', ['-s', serial, 'emu', 'kill']);
-            summary.adbEnumeratedKills.push({serial, ...res});
-        }
-
-        // Kill common QEMU processes that might remain (avoid broad -f on 'emulator' to not match our API path)
-        const killPatterns = [
-            ['pkill', ['-f', 'qemu-system-']],
-            ['pkill', ['-x', 'emulator']],
-            ['pkill', ['-x', 'emulator-headless']],
-        ];
-        for (const [cmd, args] of killPatterns) {
-            // eslint-disable-next-line no-await-in-loop
-            const res = await trySpawn(cmd, args);
-            summary.processKills.push(res);
-        }
-
-        // // Kill adb server to release any lingering connections/ports
-        // summary.adbKill = await trySpawn('adb', ['kill-server']);
-
-        // Ensure next emulator start is a fresh device (one-time wipe)
-        setWipeOnceFlag();
-        summary.wipeNextStart = true;
-
-        // Deep clean: remove caches/locks/logs/snapshots and temp emulator files
-        try {
-            const dc = this.deepCleanEmulatorCaches();
-            summary.deepClean = dc;
-        } catch (e) {
-            summary.deepClean.errors = [String(e?.message || e)];
-        }
-
-        // Optionally restart this API via PM2 if service name is provided
-        const pm2Service = process.env.PM2_APP_NAME;
-        if (pm2Service && pm2Service.trim().length > 0) {
-            try {
-                summary.pm2Restart = await (async () => {
-                    // reuse trySpawn in this scope
-                    return await trySpawn('pm2', ['restart', pm2Service]);
-                })();
-            } catch (e) {
-                summary.pm2Restart = { command: `pm2 restart ${pm2Service}`, code: -1, stderr: String(e?.message || e) };
-            }
-        }
-
-        return summary;
-    },
-
-    /**
-     * Remove emulator caches/locks/logs/snapshots under ~/.android/avd and temp files in /tmp.
-     * Does not delete AVD definitions (.ini or system images). Best-effort and safe.
-     */
-    deepCleanEmulatorCaches() {
-        const res = { avdPaths: [], tmpPaths: [], errors: [] };
-        try {
-            const home = process.env.HOME || process.env.USERPROFILE || '';
-            if (home) {
-                const avdRoot = path.join(home, '.android', 'avd');
-                if (fs.existsSync(avdRoot)) {
-                    const entries = fs.readdirSync(avdRoot, { withFileTypes: true });
-                    for (const ent of entries) {
-                        if (!ent.isDirectory() || !ent.name.endsWith('.avd')) continue;
-                        const avdDir = path.join(avdRoot, ent.name);
-                        const targets = [
-                            'cache.img',
-                            'cache.img.qcow2',
-                            'multiinstance.lock',
-                            'hardware-qemu.ini.lock',
-                            'config.ini.lock',
-                        ];
-                        const targetDirs = ['snapshots', 'logs', 'tmp'];
-                        for (const f of targets) {
-                            const p = path.join(avdDir, f);
-                            try { if (fs.existsSync(p)) { fs.rmSync(p, { force: true }); res.avdPaths.push(p); } } catch (e) { res.errors.push(`${p}: ${e.message}`); }
-                        }
-                        for (const d of targetDirs) {
-                            const p = path.join(avdDir, d);
-                            try { if (fs.existsSync(p)) { fs.rmSync(p, { recursive: true, force: true }); res.avdPaths.push(p); } } catch (e) { res.errors.push(`${p}: ${e.message}`); }
-                        }
-                        // Remove generic *.lock files
-                        try {
-                            const avdFiles = fs.readdirSync(avdDir);
-                            for (const name of avdFiles) {
-                                if (name.endsWith('.lock')) {
-                                    const p = path.join(avdDir, name);
-                                    try { fs.rmSync(p, { force: true }); res.avdPaths.push(p); } catch (e) { res.errors.push(`${p}: ${e.message}`); }
-                                }
-                            }
-                        } catch (e) { res.errors.push(`${avdDir}: ${e.message}`); }
-                    }
-                }
-            }
-        } catch (e) {
-            res.errors.push(`avdRoot: ${e.message}`);
-        }
-
-        // Clean /tmp emulator leftovers
-        try {
-            const tmp = '/tmp';
-            const patterns = [/^android-emu/i, /^android-.*/i, /^AndroidEmulator/i, /^emu-.*$/i];
-            if (fs.existsSync(tmp)) {
-                const entries = fs.readdirSync(tmp, { withFileTypes: true });
-                for (const ent of entries) {
-                    const name = ent.name;
-                    if (patterns.some((re) => re.test(name))) {
-                        const p = path.join(tmp, name);
-                        try { fs.rmSync(p, { recursive: true, force: true }); res.tmpPaths.push(p); } catch (e) { res.errors.push(`${p}: ${e.message}`); }
-                    }
-                }
-            }
-        } catch (e) {
-            res.errors.push(`tmp: ${e.message}`);
-        }
-
-        return res;
-    },
+  /** Stop every emulator and clear the registry. */
+  async cleanupAll(options) {
+    const summary = await emulatorService.cleanupAll(options);
+    deviceManager.clear();
+    return summary;
+  },
 };
 
 module.exports = deviceService;

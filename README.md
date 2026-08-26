@@ -58,107 +58,167 @@ A lightweight HTTP API for orchestrating Android emulators and device actions fr
 
 
 ## API Reference
-Below is a concise list of primary endpoints. All bodies are JSON unless noted.
 
-- **GET /** – health/status.
+All bodies are JSON.
 
-- **POST /devices/register** – register a device (starts emulator if Android and no `meta.deviceId`).
-  - Body:
-    - `platform`: `android` | `ios`
-    - `avd`: name of the AVD to boot (Android)
-    - `proxy`: optional HTTP proxy (e.g., `http://user:pass@host:port`)
-    - `meta`: optional metadata
+### Status
+- `GET /` – health summary.
+- `GET /health` – uptime, registered devices, emulators adb can see.
 
-- **GET /devices** – list registered devices.
+### Inventory
+- `GET /avds` – AVDs on this host with their current screen/density/RAM.
+- `GET /profiles` – available realistic device profiles.
+- `POST /avds/:avd/profile` – apply a profile to an AVD's `config.ini` without booting.
+  - Body: `{ "profile": "pixel_5" }`
 
-- **POST /devices/:id/proxy** – set proxy for a device.
-  - Body: `{ "proxy": "http://host:port" }`
+### Devices
+- `POST /devices/register` – register a device. **Waits for the emulator to finish booting**, then applies realistic device settings, so the device is usable when this returns.
+  - Body: `platform` (`android`|`ios`), `avd`, optional `profile`, `proxy`, `wipe`, `meta`.
+  - Pass `meta.deviceId` (e.g. `emulator-5554`) to adopt an already-running emulator instead of booting one.
+- `GET /devices` · `GET /devices/:id`
+- `DELETE /devices/:id` – stop the emulator and drop the registration.
+- `POST /devices/:id/proxy` – set/clear the guest HTTP proxy. Body: `{ "proxy": "http://host:port" }` (`null` clears).
 
-- **POST /devices/:id/launch** – launch app by package name.
-  - Body: `{ "appId": "com.example.app" }`
-- **POST /devices/:id/close** – close app by package name.
-  - Body: `{ "appId": "com.example.app" }`
+### Apps and input
+- `POST /devices/:id/launch` · `/close` – Body: `{ "appId": "com.example.app" }`
+- `POST /devices/:id/tap` – `{ "x": 100, "y": 200 }`
+- `POST /devices/:id/swipe` – `{ "x1":0,"y1":0,"x2":100,"y2":200,"durationMs":500 }`
+- `POST /devices/:id/type` – `{ "text": "Hello" }`
+- `POST /devices/:id/back` · `/home`
+- `POST /devices/:id/rotate` – `{ "orientation": "portrait"|"landscape" }`
+- `POST /devices/:id/intent` – `{ "action", "data", "category", "component", "flags", "extras" }`
 
-- **POST /devices/:id/tap** – tap coordinates.
-  - Body: `{ "x": 100, "y": 200 }`
-- **POST /devices/:id/swipe** – swipe between coordinates.
-  - Body: `{ "x1":0, "y1":0, "x2":100, "y2":200, "durationMs":500 }`
-- **POST /devices/:id/type** – type text.
-  - Body: `{ "text": "Hello" }`
-- **POST /devices/:id/back** – navigate back.
-- **POST /devices/:id/home** – go home.
-- **POST /devices/:id/rotate** – set orientation.
-  - Body: `{ "orientation": "portrait" | "landscape" }`
+### Finding and clicking elements
+`click-by-text`, `wait-for-text` and `find` share one selector:
 
-- **POST /devices/:id/adb** – run arbitrary adb subcommand against the mapped emulator.
-  - Body: `{ "command": "shell pm list packages" }` (string or array)
+| Field | Default | Meaning |
+|---|---|---|
+| `text` | required | What to look for |
+| `exact` | `false` | Exact match instead of substring |
+| `field` | `any` | `any` \| `text` \| `content-desc` \| `resource-id` \| `hint` |
+| `className` | – | Restrict to a widget class, e.g. `Button` |
+| `index` | `0` | Which ranked match to use |
+| `timeoutMs` | `5000` | How long to wait for it to appear |
+| `scroll` | `true` | Scroll to look for it (then reverse at the end of the list) |
+| `maxScrolls` | `6` | Scroll attempts |
+| `requireVisible` | `true` | Ignore off-screen matches |
+| `verify` | `true` | Report whether the tap changed the screen |
 
-- **POST /devices/:id/intent** – send Android intent.
-  - Body example:
-    ```json
-    {
-      "action": "android.intent.action.VIEW",
-      "data": "google.navigation:q=37.7749,-122.4194",
-      "component": "com.google.android.apps.maps"
-    }
-    ```
+Matching is case-, whitespace- and NBSP-insensitive; `resource-id` matches the
+short form (`login_button` matches `com.example:id/login_button`). Candidates are
+**ranked**, not taken in document order, and the tap lands on the nearest
+clickable ancestor — a label inside a clickable row works.
 
-- **POST /devices/:id/gps/set** – set GPS location.
-  - Body: `{ "lat": 37.7749, "lon": -122.4194 }`
+- `POST /devices/:id/click-by-text` – find and tap.
+- `POST /devices/:id/wait-for-text` – wait for an element without tapping.
+- `POST /devices/:id/find` – list ranked matches with scores. Use this to debug a selector.
+- `POST /devices/:id/type-into` – focus a field by label/hint and type. Body adds `value`, `clear`.
 
-- **POST /devices/:id/gps/route** – simulate route along points.
-  - Body: `{ "points": [{"lat":..,"lon":..}, ...], "intervalMs": 2000, "loop": false }`
+A 404 from these includes `visibleText` (what is actually on screen) and
+`candidates` (near misses with scores), so a failing selector is diagnosable
+from the response alone.
 
-- **POST /devices/:id/screenshot** – returns a PNG stream once.
-- **GET /devices/:id/stream** – multipart stream of PNG frames.
+- `GET /devices/:id/pageinfo` – foreground package/activity plus structured screen contents.
 
-- **POST /cleanup** – stop all emulators and cleanup processes.
-  - Behavior:
-    - Attempts graceful shutdown (`adb -s emulator-XXXX emu kill`) for all known and detected emulators.
-    - Force-kills leftover `qemu-system-*` or exact `emulator` binaries if needed.
-    - Kills the `adb` server.
-    - Sets a one-time flag so the **next** emulator start uses `-wipe-data` (fresh device state).
-  - Example:
-    ```bash
-    curl -X POST http://localhost:3000/cleanup
-    ```
+### Location
+- `POST /devices/:id/gps/set` – `{ "lat", "lon", "speed", "bearing" }`
+- `POST /devices/:id/gps/route` – `{ "points": [{lat,lon}], "intervalMs": 2000, "loop": false }`
+- `GET /devices/:id/gps/route` – list running route tasks.
+- `DELETE /devices/:id/gps/route/:taskId` – stop one.
+- `POST /devices/:id/navigate` – `{ "origin", "destination" }`; fetches a Google Directions route and drives GPS along it. Needs `GOOGLE_MAPS_API_KEY`.
 
+### Capture
+- `GET|POST /devices/:id/screenshot` – PNG.
+- `GET /devices/:id/stream?intervalMs=500` – multipart PNG stream.
 
-## Cleanup semantics (Fresh device on next start)
-- `POST /cleanup` ensures the next `register` that boots an emulator will pass `-wipe-data`, producing a fresh data partition (no installed apps, new Android ID, no previous state).
-- This is implemented via a one-time flag stored in `.state/wipe-once.flag` that is consumed on the next boot.
-- The device registry is cleared during cleanup via `deviceManager.clear()` so subsequent registrations are fresh records.
+### Raw adb
+- `POST /devices/:id/adb` – `{ "command": "shell pm list packages" }`.
+  Disabled unless `ALLOW_RAW_ADB=true`; it is arbitrary command execution on the device.
 
-
-## Environment Variables
-- `PORT`: server port (default `3000`).
-- `LOG_LEVEL`: pino log level (`info`, `debug`, etc.).
-- `GOOGLE_MAPS_API_KEY`: required for Directions-based GPS routes and Maps intents in `navigationService`.
-- `EMULATOR_HEADLESS`: when `true`, starts the Android emulator with `-no-window` (headless mode). Default: `false`.
-- `EMULATOR_GPU`: Android emulator GPU mode passed to `-gpu`. Default: `auto`. Common values: `host`, `auto`, `swiftshader`, `swangle`, `software`, `lavapipe`.
-- `EMULATOR_DNS`: optional comma-separated DNS servers passed to emulator via `-dns-server`. Example: `8.8.8.8,1.1.1.1`.
+### Maintenance
+- `POST /cleanup` – stop every emulator and clear the registry.
+  - Body: `{ "wipeNextStart": true }` (default) arms a one-shot `-wipe-data` for the next boot.
+  - It stops emulators and nothing else. It does **not** delete AVDs, kill unrelated
+    processes, or restart this service.
 
 
-## Security & Hardening
-- **Rate limiting:** Global limiter is enabled in `index.js` via `express-rate-limit`.
-- **Helmet & CORS:** Enabled by default.
-- Consider protecting sensitive endpoints (like `/cleanup`) with an auth token, IP allowlist, or stricter rate limits.
+## Device realism
+
+`GET /profiles` lists the built-in profiles. Each carries a real handset's panel
+size, density, RAM and build identifiers.
+
+Applying a profile (on boot, or via `POST /avds/:avd/profile`) rewrites the AVD's
+`config.ini`: screen geometry and density, 32-bit colour depth, RAM and heap,
+gesture navigation (no hardware keys, d-pad or trackball), front and back
+cameras, the full sensor set, and an LTE-shaped network instead of the
+unthrottled default.
+
+After boot the device is configured the way a phone in use looks: battery at a
+partial level and discharging rather than pinned to 100% on AC, a real device
+name, timezone, screen timeout, location enabled, setup marked complete, and
+animations left on (set `DEVICE_DISABLE_ANIMATIONS=true` to trade that for speed).
+
+**Build identity is a known limitation.** Profile props are passed with `-prop`,
+but the emulator's system image fixes `ro.product.*` as read-only, so
+`Build.MODEL` still reports `sdk_gphone64_x86_64` — verified on this setup.
+Changing it for real requires a writable `/system`:
+
+```bash
+DEVICE_WRITABLE_SYSTEM=true   # boot with -writable-system
+adb -s emulator-5554 root && adb -s emulator-5554 remount
+# patch ro.product.* in /system/build.prop, then reboot
+```
+
+This disables verity and slows the first boot, so it is off by default. The
+screen, hardware, sensor and behavioural realism above all apply either way.
+
+
+## Performance notes
+
+- **Quick boot** (`EMULATOR_QUICK_BOOT=true`) boots from the AVD snapshot.
+  `-wipe-data` is applied only when asked, not on every start. `-read-only` is
+  now opt-in (`EMULATOR_READ_ONLY`) because it blocks snapshot saving, which
+  silently defeats quick boot; enable it only to run several instances of one AVD.
+- **`register` waits for boot**, so callers no longer race an unbooted device.
+- **UI dumps** use one `exec-out uiautomator dump /dev/tty` round trip instead of
+  dump + pull + read + unlink, and are cached briefly so a dialog check and a
+  click share one dump.
+- **No implicit UI dump per adb call.** ANR/crash dialogs are suppressed at boot
+  with `hide_error_dialogs` instead of being polled for.
+- **adb calls are serialised per device**, so concurrent dumps and screencaps do
+  not clobber each other.
+- **RAM** follows the device profile, capped to what the host can actually back.
+
+
+## Security
+
+- `API_TOKEN` enables bearer auth on every endpoint except `/` and `/health`.
+  Without it the API is unauthenticated — and it can read the screen, install
+  apps and run adb.
+- `ALLOW_RAW_ADB` gates the arbitrary-adb endpoint (default off).
+- `CORS_ORIGIN` restricts origins.
+- All device commands are spawned as argv arrays and quoted for the device
+  shell, so text, intent URIs and package names cannot inject commands.
 
 
 ## Troubleshooting
-- Emulator doesn’t start:
-  - Ensure `emulator` and `adb` are on PATH and an AVD named in `register` exists.
-  - Try `POST /cleanup` then re-register; next start will use `-wipe-data`.
-- ADB not detected or device offline:
-  - `POST /cleanup` kills the adb server; the next command restarts it.
-- API stopped after cleanup:
-  - Fixed by avoiding broad `pkill -f emulator`; now uses exact matches and adb enumeration.
+
+- **Emulator will not start** – check `emulator -accel-check`, confirm the AVD
+  exists (`GET /avds`), and confirm the SDK was detected (`GET /health`).
+- **`Could not read UI hierarchy`** – uiautomator failed, usually mid-animation
+  or while a system overlay has focus. Calls retry automatically; if it persists,
+  the screen may be off.
+- **Selector not matching** – `POST /devices/:id/find` shows every ranked
+  candidate with its score.
+- **Stale emulators** – `POST /cleanup`.
 
 
 ## Development
-- Start server: `npm start`
-- Dev mode (nodemon): `npm run dev`
-- Logging level via `LOG_LEVEL=debug` for more verbosity.
+
+```bash
+npm start        # or: npm run dev
+LOG_LEVEL=debug npm start
+```
 
 
 ## License
