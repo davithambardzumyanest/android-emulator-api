@@ -66,8 +66,10 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function resolveMemoryMb(profileName) {
   if (config.emulator.memoryMb) return config.emulator.memoryMb;
 
+  // Profile RAM (8 GB for a Pixel 5) is realistic but expensive: several
+  // emulators at that size saturate a shared host. Opt in explicitly.
   const profile = profiles.get(profileName);
-  const wanted = profile?.ramMb || 4096;
+  const wanted = config.emulator.memoryFromProfile ? (profile?.ramMb || 4096) : 4096;
 
   // os.freemem() ignores reclaimable page cache and badly understates what is
   // usable, so prefer MemAvailable where the kernel reports it.
@@ -237,6 +239,10 @@ class EmulatorService {
       await this.waitForBoot(serial, () => exited);
     } catch (e) {
       portAllocator.release(port);
+      // Kill the process group: `emulator` is a launcher that execs qemu as a
+      // child, so signalling only the launcher leaves qemu running and holding
+      // the port — an orphan that survives the failed registration.
+      try { process.kill(-proc.pid, 'SIGKILL'); } catch (_) { /* already gone */ }
       try { proc.kill('SIGKILL'); } catch (_) { /* already gone */ }
       e.message = `${e.message}${earlyError ? ` (emulator said: ${earlyError.trim().split('\n').slice(-3).join(' | ')})` : ''}`;
       throw e;

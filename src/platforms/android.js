@@ -128,31 +128,16 @@ module.exports = {
 
   /**
    * Current foreground package/activity plus a structured view of the screen.
+   *
+   * The package is derived from the UI dump we already need, rather than from
+   * `dumpsys`: every uiautomator node carries a `package` attribute, so this
+   * costs nothing extra and works across API levels. The old code parsed
+   * `dumpsys window` output with a regex whose capture group could only ever
+   * match a single character, and returned null on Android 14 where the
+   * format differs.
    */
   async getCurrentPageInfo(device) {
     const serial = serialOf(device);
-
-    let packageName = null;
-    let activityName = null;
-
-    // `dumpsys activity activities` is stable across API levels; the previous
-    // code piped through grep, which exits 1 when nothing matches and made adb
-    // report a failure for a perfectly normal screen.
-    const dump = await shell(serial, ['dumpsys', 'activity', 'activities'], { check: false });
-    const focus = /mResumedActivity: ActivityRecord\{[^ ]+ [^ ]+ ([^/]+)\/([^ }]+)/.exec(dump)
-      || /mCurrentFocus=Window\{[^ ]+ [^ ]+ ([^/]+)\/([^ }]+)/.exec(dump);
-
-    if (focus) {
-      packageName = focus[1];
-      activityName = focus[2];
-    } else {
-      const windows = await shell(serial, ['dumpsys', 'window'], { check: false });
-      const win = /mCurrentFocus=Window\{[^ ]+ [^ ]+ ([^/\s}]+)(?:\/([^\s}]+))?/.exec(windows);
-      if (win) {
-        packageName = win[1];
-        activityName = win[2] || null;
-      }
-    }
 
     const page = {
       textElements: [],
@@ -163,10 +148,13 @@ module.exports = {
       error: null,
     };
 
+    let packageName = null;
+    let nodes = [];
+
     try {
-      // Parsed with fast-xml-parser rather than regex over the raw XML, so
-      // attribute values containing quotes or '>' no longer corrupt results.
-      const nodes = await ui.nodes(serial, { fresh: true });
+      nodes = await ui.nodes(serial, { fresh: true });
+      packageName = ui.foregroundPackage(nodes);
+
       const seen = { text: new Set(), desc: new Set(), click: new Set(), button: new Set() };
 
       for (const node of nodes) {
@@ -195,7 +183,7 @@ module.exports = {
           });
         }
 
-        if ((cls.endsWith('Button') || node.class === 'android.widget.Button') && (text || desc)) {
+        if (cls.endsWith('Button') && (text || desc)) {
           const label = text || desc;
           if (!seen.button.has(label)) {
             seen.button.add(label);
@@ -208,6 +196,20 @@ module.exports = {
       page.contentDescriptions = [...seen.desc];
     } catch (e) {
       page.error = `UI dump failed: ${e.message}`;
+    }
+
+    // The activity name needs dumpsys, which is slow and can stall on a loaded
+    // host. It is a nice-to-have, so cap it and carry on without it.
+    let activityName = null;
+    try {
+      const dump = await shell(serial, ['dumpsys', 'activity', 'activities'], { check: false, timeoutMs: 8000 });
+      const match = /(?:mResumedActivity|topResumedActivity)[^{]*\{[^ ]* [^ ]* ([\w.]+)\/([\w.$]+)/.exec(dump);
+      if (match) {
+        if (!packageName) packageName = match[1];
+        activityName = match[2];
+      }
+    } catch (e) {
+      logger.debug({ serial, err: e.message }, 'activity name lookup skipped');
     }
 
     return {

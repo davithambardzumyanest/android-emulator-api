@@ -207,7 +207,39 @@ function match(list, { text, exact = false, field = 'any' }) {
   }));
 }
 
+/**
+ * Foreground app package, read from the dump's own `package` attributes.
+ * Picks the package covering the most screen area, ignoring system chrome
+ * (status bar, nav bar, IME) which is always present but never the app.
+ */
+const CHROME_PACKAGES = new Set([
+  'com.android.systemui',
+  'android',
+  'com.google.android.inputmethod.latin',
+  'com.android.inputmethod.latin',
+]);
+
+function foregroundPackage(list) {
+  const area = new Map();
+
+  for (const node of list) {
+    const pkg = node.package;
+    if (!pkg || CHROME_PACKAGES.has(pkg)) continue;
+    const b = parseBounds(node.bounds);
+    if (!b || b.width <= 0 || b.height <= 0) continue;
+    area.set(pkg, Math.max(area.get(pkg) || 0, b.width * b.height));
+  }
+
+  if (area.size === 0) {
+    // Nothing but system chrome on screen — report it rather than null.
+    const fallback = list.find((n) => n.package && CHROME_PACKAGES.has(n.package));
+    return fallback ? fallback.package : null;
+  }
+
+  return [...area.entries()].sort((a, b) => b[1] - a[1])[0][0];
+}
+
 module.exports = {
   dumpXml, invalidate, nodes, parseBounds, match, flatten,
-  screenSize, isVisible, clickableAncestor, scrollableContainer,
+  screenSize, isVisible, clickableAncestor, scrollableContainer, foregroundPackage,
 };

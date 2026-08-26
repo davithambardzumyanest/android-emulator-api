@@ -67,8 +67,10 @@ const config = {
   emulator: {
     headless: bool(process.env.EMULATOR_HEADLESS, false),
     gpu: process.env.EMULATOR_GPU || 'swiftshader_indirect',
-    // Unset => derive from the device profile, clamped to host RAM.
+    // Explicit RAM in MB. Unset => 4096, or the device profile's RAM when
+    // EMULATOR_MEMORY_FROM_PROFILE is on. Always clamped to host memory.
     memoryMb: int(process.env.EMULATOR_MEMORY_MB, null),
+    memoryFromProfile: bool(process.env.EMULATOR_MEMORY_FROM_PROFILE, false),
     cores: int(process.env.EMULATOR_CORES, 4),
     dns: process.env.EMULATOR_DNS || '',
     // Quick boot reuses the AVD snapshot: seconds instead of a cold boot.
