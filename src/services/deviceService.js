@@ -51,6 +51,8 @@ const deviceService = {
         command: started.command,
       };
       meta.profile = started.profile;
+      // The emulator proxies the guest's traffic itself, credentials included.
+      meta.emulatorProxy = Boolean(proxy);
     }
 
     if (platform === 'android' && meta.deviceId) {
@@ -71,12 +73,28 @@ const deviceService = {
 
     const device = deviceManager.register({ platform, proxy, meta });
 
-    if (platform === 'android' && proxy) {
+    // Only set a proxy *inside* the guest when the emulator is not already
+    // proxying for us.
+    //
+    // `-http-proxy` handles the guest's traffic at the QEMU level and keeps the
+    // credentials. Android's global http_proxy setting cannot carry
+    // credentials, so also setting it there sends apps to the same proxy
+    // unauthenticated — a second hop that answers 407. That is what breaks
+    // Google Maps with "Can't connect to Maps" on a proxied device.
+    if (platform === 'android' && proxy && !meta.emulatorProxy) {
       try {
         await this.applyProxy(device.id, proxy);
       } catch (e) {
         logger.warn({ deviceId: device.id, err: e.message }, 'applyProxy on register failed');
       }
+    } else if (meta.emulatorProxy) {
+      // Clear any stale in-guest proxy left by an earlier boot or a wiped image.
+      try {
+        await this.applyProxy(device.id, null);
+      } catch (e) {
+        logger.debug({ deviceId: device.id, err: e.message }, 'could not clear in-guest proxy');
+      }
+      logger.info({ deviceId: device.id }, 'proxy handled by the emulator; in-guest proxy left unset');
     }
 
     return device;
@@ -162,8 +180,16 @@ const deviceService = {
       e.status = 400;
       throw e;
     }
+
+    const device = deviceManager.ensure(id);
+    const warning = device.meta?.emulatorProxy && proxy
+      ? 'This emulator already proxies traffic itself (-http-proxy). Setting an in-guest proxy adds an '
+        + 'unauthenticated second hop and typically breaks HTTPS apps such as Google Maps.'
+      : undefined;
+
     const result = await this.applyProxy(id, proxy);
-    return { device: deviceManager.ensure(id), ...result };
+    if (warning) logger.warn({ deviceId: id }, warning);
+    return { device: deviceManager.ensure(id), ...result, ...(warning ? { warning } : {}) };
   },
 
   /**
