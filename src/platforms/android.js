@@ -241,7 +241,10 @@ module.exports = {
    * @param {{lat:number, lon:number, speed?:number, bearing?:number,
    *          altitude?:number, satellites?:number}} fix speed in m/s
    */
-  async setGPS(device, { lat, lon, speed = 0, bearing = 0, altitude = 0, satellites = 12 }) {
+  async setGPS(device, {
+    lat, lon, speed = 0, bearing = 0, altitude = 0, satellites = 12,
+    waitForFix = false, toleranceMeters = 25, fixTimeoutMs = 15000,
+  }) {
     const serial = serialOf(device);
 
     const knots = geo.metersPerSecondToKnots(Math.max(0, speed));
@@ -263,7 +266,7 @@ module.exports = {
       await adbText(serial, ['emu', 'geo', 'nmea', sentence], { check: false });
     }
 
-    return {
+    const result = {
       ok: true,
       lat,
       lon,
@@ -271,6 +274,56 @@ module.exports = {
       bearing,
       // Be explicit rather than letting callers assume bearing was applied.
       bearingApplied: false,
+    };
+
+    // Injecting a fix is asynchronous: the console accepts it, then the GNSS
+    // HAL delivers it and the framework records it. Starting navigation in that
+    // window makes an app plan a route from the *previous* position, which is
+    // the usual reason a simulated drive begins in the wrong place.
+    if (waitForFix) {
+      const settled = await this.waitForFix(device, { lat, lon, toleranceMeters, timeoutMs: fixTimeoutMs });
+      result.fix = settled;
+      if (!settled.matched) result.warning = settled.reason;
+    }
+
+    return result;
+  },
+
+  /**
+   * Block until the platform reports a position close to the target.
+   * @returns {{matched:boolean, waitedMs:number, location?:object, reason?:string}}
+   */
+  async waitForFix(device, { lat, lon, toleranceMeters = 25, timeoutMs = 15000, pollMs = 500 }) {
+    const startedAt = Date.now();
+    let last = null;
+
+    while (Date.now() - startedAt < timeoutMs) {
+      // eslint-disable-next-line no-await-in-loop
+      const { location } = await this.getLocation(device);
+      if (location) {
+        last = location;
+        const off = geo.distanceMeters({ lat, lon }, { lat: location.lat, lon: location.lon });
+        if (off <= toleranceMeters) {
+          return {
+            matched: true,
+            waitedMs: Date.now() - startedAt,
+            offsetMeters: Math.round(off),
+            location,
+          };
+        }
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+
+    return {
+      matched: false,
+      waitedMs: Date.now() - startedAt,
+      location: last,
+      // An idle device records nothing, so this is not necessarily a failure.
+      reason: last
+        ? `Platform still reports ${last.lat},${last.lon} after ${timeoutMs}ms`
+        : 'No app is requesting location, so Android records no fix to confirm against',
     };
   },
 

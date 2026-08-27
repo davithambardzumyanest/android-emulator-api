@@ -109,6 +109,11 @@ const actionService = {
       bearing: body?.bearing === undefined ? 0 : requireNumber(body.bearing, 'bearing'),
       altitude: body?.altitude === undefined ? 0 : requireNumber(body.altitude, 'altitude'),
       satellites: body?.satellites === undefined ? 12 : requireNumber(body.satellites, 'satellites'),
+      // Confirm the platform actually reports the new position before
+      // returning, so a navigation request that follows cannot race the fix.
+      waitForFix: Boolean(body?.waitForFix),
+      toleranceMeters: body?.toleranceMeters === undefined ? 25 : requireNumber(body.toleranceMeters, 'toleranceMeters'),
+      fixTimeoutMs: body?.fixTimeoutMs === undefined ? 15000 : requireNumber(body.fixTimeoutMs, 'fixTimeoutMs'),
     });
   },
 

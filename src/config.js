@@ -113,6 +113,14 @@ const config = {
     // Boot with a writable /system so build.prop can be patched. Required for
     // real build-identity spoofing; see "Device realism" in the README.
     writableSystem: bool(process.env.DEVICE_WRITABLE_SYSTEM, false),
+    // Use only the injected GPS fix for location. Android's fused provider
+    // otherwise blends in network (Wi-Fi/cell/IP) location, which disagrees
+    // with the injected position whenever the device is behind a proxy in a
+    // different country — and apps then route from the wrong origin.
+    gpsOnly: bool(process.env.DEVICE_GPS_ONLY, true),
+    // Wi-Fi feeds the network location provider; a phone navigating in a car
+    // is on mobile data anyway.
+    wifi: bool(process.env.DEVICE_WIFI, false),
   },
 
   adb: {

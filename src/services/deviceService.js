@@ -6,6 +6,7 @@ const profiles = require('../devices/profiles');
 const config = require('../config');
 const logger = require('../logger');
 const { adbText, shell, getProp, listEmulators } = require('../utils/adb');
+const ActionEngine = require('../actions/actionEngine');
 
 /** Parse a proxy into host/port. */
 function parseProxy(value) {
@@ -31,7 +32,10 @@ const deviceService = {
    * so the device is usable the moment this resolves.
    */
   async register(payload = {}) {
-    const { platform, proxy, meta = {}, avd, profile, wipe } = payload;
+    const {
+      platform, proxy, meta = {}, avd, profile, wipe,
+      settings, location,
+    } = payload;
 
     if (!['android', 'ios'].includes(platform)) {
       const e = new Error("'platform' must be 'android' or 'ios'");
@@ -40,7 +44,7 @@ const deviceService = {
     }
 
     if (platform === 'android' && !meta.deviceId) {
-      const started = await emulatorService.start({ avd, proxy, profile, wipe });
+      const started = await emulatorService.start({ avd, proxy, profile, wipe, settings });
       meta.deviceId = started.serial;
       meta.emulator = {
         avd: started.avd,
@@ -51,8 +55,16 @@ const deviceService = {
         command: started.command,
       };
       meta.profile = started.profile;
+      meta.settings = started.settings;
       // The emulator proxies the guest's traffic itself, credentials included.
       meta.emulatorProxy = Boolean(proxy);
+    } else if (platform === 'android' && meta.deviceId && settings) {
+      // Adopting a running emulator: still honour an explicit settings block.
+      const live = await listEmulators().catch(() => []);
+      if (live.includes(meta.deviceId)) {
+        const applied = await emulatorService.configureDevice(meta.deviceId, profile, settings);
+        meta.settings = applied.settings;
+      }
     }
 
     if (platform === 'android' && meta.deviceId) {
@@ -95,6 +107,27 @@ const deviceService = {
         logger.debug({ deviceId: device.id, err: e.message }, 'could not clear in-guest proxy');
       }
       logger.info({ deviceId: device.id }, 'proxy handled by the emulator; in-guest proxy left unset');
+    }
+
+    // Seed the starting position so the first navigation request is planned
+    // from where the caller intends, not from wherever the image was left.
+    if (platform === 'android' && location) {
+      try {
+        meta.location = await ActionEngine.setGPS(device.id, {
+          lat: Number(location.lat),
+          lon: Number(location.lon),
+          speed: location.speed === undefined ? 0 : Number(location.speed),
+          bearing: location.bearing === undefined ? 0 : Number(location.bearing),
+          altitude: location.altitude === undefined ? 0 : Number(location.altitude),
+          satellites: location.satellites === undefined ? 12 : Number(location.satellites),
+          waitForFix: Boolean(location.waitForFix),
+          toleranceMeters: location.toleranceMeters === undefined ? 25 : Number(location.toleranceMeters),
+          fixTimeoutMs: location.fixTimeoutMs === undefined ? 15000 : Number(location.fixTimeoutMs),
+        });
+        deviceManager.update(device.id, { meta: device.meta });
+      } catch (e) {
+        logger.warn({ deviceId: device.id, err: e.message }, 'initial location could not be set');
+      }
     }
 
     return device;

@@ -11,6 +11,7 @@ const config = require('../config');
 const logger = require('../logger');
 const profiles = require('../devices/profiles');
 const avdConfig = require('../devices/avdConfig');
+const deviceSettings = require('../devices/deviceSettings');
 const portAllocator = require('../utils/portAllocator');
 const { run, adb, adbText, shell, getProp, listEmulators } = require('../utils/adb');
 const { suppressDialogs } = require('../utils/dialogHandler');
@@ -207,7 +208,7 @@ class EmulatorService {
    * Start an emulator and wait until it is usable.
    * @returns {Promise<{serial:string, port:number, pid:number, avd:string, bootMs:number, profile:object}>}
    */
-  async start({ avd, proxy, profile: profileName = config.device.profile, wipe } = {}) {
+  async start({ avd, proxy, profile: profileName = config.device.profile, wipe, settings } = {}) {
     if (!avd) {
       const e = new Error("'avd' is required");
       e.status = 400;
@@ -308,7 +309,7 @@ class EmulatorService {
     }
     logger.info({ serial, bootMs, pid: emulatorPid }, 'emulator booted');
 
-    await this.configureDevice(serial, profileName);
+    const configured = await this.configureDevice(serial, profileName, settings);
     portAllocator.release(port); // now tracked via `adb devices`
 
     return {
@@ -318,6 +319,7 @@ class EmulatorService {
       avd,
       bootMs,
       profile: profileResult,
+      settings: configured.settings,
       command: `emulator ${args.join(' ')}`,
     };
   }
@@ -366,8 +368,9 @@ class EmulatorService {
    * Post-boot settings that make the device behave like a real handset in use,
    * and remove the things that made automation flaky.
    */
-  async configureDevice(serial, profileName = config.device.profile) {
+  async configureDevice(serial, profileName = config.device.profile, overrides = {}) {
     const profile = profiles.get(profileName);
+    const settings = deviceSettings.resolve(overrides);
     const applied = [];
     const failed = [];
 
@@ -400,12 +403,12 @@ class EmulatorService {
     }
 
     // Keep the screen on and unlocked so screenshots and taps land.
-    // Note stay_on_while_plugged_in only holds while the device is charging,
-    // and the realism settings below deliberately unplug it — so the screen
-    // timeout is what actually keeps the device awake. Without a long timeout
-    // the screen sleeps and every uiautomator dump fails with "null root node".
+    // stay_on_while_plugged_in only holds while charging, and the realism
+    // settings below deliberately unplug the device — so the screen timeout is
+    // what actually keeps it awake. Without a long timeout the screen sleeps
+    // and every uiautomator dump fails with "null root node".
     await put('global', 'stay_on_while_plugged_in', 7);
-    await put('system', 'screen_off_timeout', config.device.screenOffTimeoutMs);
+    await put('system', 'screen_off_timeout', settings.screenOffTimeoutMs);
     await run('wake', ['input', 'keyevent', 'KEYCODE_WAKEUP']);
     await run('dismiss keyguard', ['wm', 'dismiss-keyguard']);
 
@@ -414,45 +417,86 @@ class EmulatorService {
     await put('secure', 'immersive_mode_confirmations', 'confirmed');
 
     // Disable the lock screen outright. After a wipe boot the device comes up
-    // locked ("Unlock for all features and data") and sits there: intents land
-    // behind the keyguard, so launching an app appears to do nothing. A single
-    // `wm dismiss-keyguard` is not enough because the keyguard returns on the
-    // next screen-off.
+    // locked and intents land behind the keyguard, so launching an app appears
+    // to do nothing. `wm dismiss-keyguard` alone is not enough: the keyguard
+    // returns on the next screen-off.
     await run('disable lockscreen', ['locksettings', 'set-disabled', 'true']);
     await put('secure', 'lockscreen.disabled', 1);
     await run('swipe away keyguard', ['input', 'keyevent', 'KEYCODE_MENU']);
 
+    // --- Location ----------------------------------------------------------
+    await run('location enabled', ['cmd', 'location', 'set-location-enabled', 'true']);
+    await put('secure', 'location_mode', settings.locationMode);
+
+    if (settings.gpsOnly) {
+      // Leave only the GPS provider in play. Otherwise the fused provider can
+      // answer with a network fix derived from Wi-Fi or the exit IP, which on a
+      // proxied device points at a different country than the injected fix —
+      // and Maps then plans a route from there.
+      await run('providers: gps only', ['settings', 'put', 'secure', 'location_providers_allowed', '-network']);
+      await run('providers: +gps', ['settings', 'put', 'secure', 'location_providers_allowed', '+gps']);
+      // Google Location Accuracy (the NLP consent) feeds the network provider.
+      await put('secure', 'network_location_opt_in', 0);
+      await put('global', 'wifi_scan_always_enabled', 0);
+      await put('global', 'ble_scan_always_enabled', 0);
+      await put('global', 'assisted_gps_enabled', 0);
+    }
+
+    // A navigation app without location permission ignores every fix we inject.
+    for (const pkg of settings.grantLocationTo) {
+      // eslint-disable-next-line no-await-in-loop
+      await run(`grant location to ${pkg}`, ['pm', 'grant', pkg, 'android.permission.ACCESS_FINE_LOCATION']);
+      // eslint-disable-next-line no-await-in-loop
+      await run(`grant coarse to ${pkg}`, ['pm', 'grant', pkg, 'android.permission.ACCESS_COARSE_LOCATION']);
+    }
+
+    await run(settings.wifi ? 'wifi on' : 'wifi off', ['svc', 'wifi', settings.wifi ? 'enable' : 'disable']);
+    await run(settings.mobileData ? 'mobile data on' : 'mobile data off', ['svc', 'data', settings.mobileData ? 'enable' : 'disable']);
+
     // --- Realism -----------------------------------------------------------
-    // A real phone is not sitting at 100% on AC forever.
-    await run('battery level', ['dumpsys', 'battery', 'set', 'level', String(config.device.batteryLevel)]);
-    await run('battery unplugged', ['dumpsys', 'battery', 'unplug']);
-    await run('battery discharging', ['dumpsys', 'battery', 'set', 'status', '3']);
+    if (settings.batteryCharging) {
+      await run('battery charging', ['dumpsys', 'battery', 'set', 'ac', '1']);
+      await run('battery status', ['dumpsys', 'battery', 'set', 'status', '2']);
+    } else {
+      // A real phone is not sitting at 100% on AC forever.
+      await run('battery unplugged', ['dumpsys', 'battery', 'unplug']);
+      await run('battery discharging', ['dumpsys', 'battery', 'set', 'status', '3']);
+    }
+    await run('battery level', ['dumpsys', 'battery', 'set', 'level', String(settings.batteryLevel)]);
 
     if (profile) {
       // Shows up in Settings and in Bluetooth/Wi-Fi Direct advertisements.
       await put('global', 'device_name', profile.props['ro.product.model']);
-      await run('bluetooth name', ['settings', 'put', 'secure', 'bluetooth_name', profile.props['ro.product.model']]);
+      await put('secure', 'bluetooth_name', profile.props['ro.product.model']);
     }
 
-    await run('timezone', ['setprop', 'persist.sys.timezone', config.device.timezone]);
+    // Timezone and locale should agree with where the device claims to be;
+    // a mismatch is both unrealistic and confuses region-sensitive apps.
+    await run('timezone', ['setprop', 'persist.sys.timezone', settings.timezone]);
+    // Locale is stored now but only takes effect on the next boot; Android has
+    // no way to switch it live from the shell.
+    await run('locale (next boot)', ['setprop', 'persist.sys.locale', settings.locale]);
     await put('system', 'screen_brightness_mode', 1);
-    await put('secure', 'location_mode', 3);
+
     // A freshly-flashed device has setup completed; leaving these at 0 leaves
-    // the setup wizard hanging in front of every app.
+    // the setup wizard in front of every app.
     await put('secure', 'user_setup_complete', 1);
     await put('global', 'device_provisioned', 1);
 
     // Animation scales: real devices animate. Only flatten them when the
     // caller has explicitly traded realism for automation speed.
-    const scale = config.device.disableAnimations ? '0' : '1';
+    const scale = settings.disableAnimations ? '0' : '1';
     await put('global', 'window_animation_scale', scale);
     await put('global', 'transition_animation_scale', scale);
     await put('global', 'animator_duration_scale', scale);
 
-    logger.info({ serial, applied: applied.length, failed: failed.length }, 'device configured');
+    logger.info(
+      { serial, applied: applied.length, failed: failed.length, gpsOnly: settings.gpsOnly },
+      'device configured',
+    );
     if (failed.length) logger.debug({ serial, failed }, 'some device settings failed');
 
-    return { applied, failed };
+    return { settings, applied, failed };
   }
 
   /** Grant a permission, ignoring "not a changeable permission" noise. */

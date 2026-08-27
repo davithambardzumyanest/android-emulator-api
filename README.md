@@ -72,9 +72,41 @@ All bodies are JSON.
   - Body: `{ "profile": "pixel_5" }`
 
 ### Devices
-- `POST /devices/register` – register a device. **Waits for the emulator to finish booting**, then applies realistic device settings, so the device is usable when this returns.
-  - Body: `platform` (`android`|`ios`), `avd`, optional `profile`, `proxy`, `wipe`, `meta`.
-  - Pass `meta.deviceId` (e.g. `emulator-5554`) to adopt an already-running emulator instead of booting one.
+- `POST /devices/register` – register a device. **Waits for the emulator to finish booting**, then applies device settings, so the device is usable when this returns.
+  - Body: `platform` (`android`|`ios`), `avd`, optional `profile`, `proxy`, `wipe`, `meta`,
+    plus `settings` and `location` below.
+  - Pass `meta.deviceId` (e.g. `emulator-5554`) to adopt an already-running emulator
+    instead of booting one. A `settings` block is applied to it too.
+
+```jsonc
+{
+  "platform": "android",
+  "avd": "pixel3_api33_2",
+  "profile": "pixel_5",
+  "proxy": "http://user:pass@host:port",
+
+  "settings": {
+    "timezone": "America/New_York",   // should match where the GPS says you are
+    "locale": "en-US",                // takes effect on the next boot
+    "gpsOnly": true,                  // ignore network/Wi-Fi location (see below)
+    "wifi": false,                    // Wi-Fi also feeds network location
+    "mobileData": true,
+    "locationMode": 3,
+    "batteryLevel": 87,
+    "batteryCharging": false,
+    "disableAnimations": false,
+    "screenOffTimeoutMs": 86400000,
+    "grantLocationTo": ["com.google.android.apps.maps"]
+  },
+
+  "location": {                       // starting position, applied after boot
+    "lat": 40.7580, "lon": -73.9855,
+    "altitude": 10, "satellites": 12,
+    "waitForFix": true,               // return only once the platform reports it
+    "toleranceMeters": 25
+  }
+}
+```
 - `GET /devices` · `GET /devices/:id`
 - `DELETE /devices/:id` – stop the emulator and drop the registration.
 - `POST /devices/:id/proxy` – set/clear the guest HTTP proxy. Body: `{ "proxy": "http://host:port" }` (`null` clears).
@@ -121,9 +153,13 @@ from the response alone.
 - `GET /devices/:id/pageinfo` – foreground package/activity plus structured screen contents.
 
 ### Location
-- `POST /devices/:id/gps/set` – `{ "lat", "lon", "speed", "bearing", "altitude", "satellites" }`
+- `POST /devices/:id/gps/set` – `{ "lat", "lon", "speed", "bearing", "altitude", "satellites", "waitForFix", "toleranceMeters", "fixTimeoutMs" }`
   - `speed` is **metres per second** (converted to knots for the emulator).
-  - `bearing` is degrees clockwise from north.
+  - `bearing` is degrees clockwise from north — accepted, but see the limitation below.
+  - `waitForFix: true` returns only once Android reports the new position (within
+    `toleranceMeters`, default 25). Use it before starting navigation: injecting a
+    fix is asynchronous, and an app that requests a route in that window plans it
+    from the *previous* position.
 - `GET /devices/:id/gps` – read back the location Android actually reports
   (provider, lat/lon, speed, bearing, accuracy), so you can verify a fix landed.
   Returns `location: null` on an idle device: Android only records fixes while
@@ -208,6 +244,28 @@ This does not block navigation. Maps and other apps derive heading from
 consecutive positions, and `simulateRoute` produces smooth, correctly-spaced
 movement at a realistic speed. Use `GET /devices/:id/gps` to confirm what the
 platform actually reports.
+
+### When an app navigates from the wrong place
+
+Two causes, both addressed above:
+
+**Conflicting location sources.** Android's *fused* provider blends GPS with a
+network fix derived from Wi-Fi, cell and the exit IP. On a proxied emulator those
+disagree — the injected fix says one country, Google's network lookup says
+wherever the proxy exits — and an app may believe the network one. `gpsOnly`
+(default **on**) removes the second opinion: it drops the network provider, turns
+off Google Location Accuracy, disables Wi-Fi scanning and turns Wi-Fi off, so the
+injected fix is the only location available. Set `"gpsOnly": false` to restore
+the blended behaviour.
+
+**Racing the fix.** Injecting a location is asynchronous. A navigation intent
+sent immediately afterwards is planned from the previous position. Use
+`"waitForFix": true` on `gps/set`, or `location.waitForFix` on register, so the
+call returns only once the platform agrees.
+
+Keep `settings.timezone` consistent with the coordinates you inject — a device
+in New York reporting Yerevan time is both unrealistic and confuses
+region-sensitive apps.
 
 ```bash
 # 50 km/h along a route, one fix per second
