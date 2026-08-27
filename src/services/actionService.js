@@ -104,10 +104,15 @@ const actionService = {
     return ActionEngine.setGPS(deviceId, {
       lat: requireNumber(body?.lat, 'lat'),
       lon: requireNumber(body?.lon, 'lon'),
-      speed: body?.speed === undefined ? 0 : requireNumber(body.speed, 'speed'),
+      // speed is metres per second; the emulator wants knots and we convert.
+      speed: body?.speed === undefined ? 0 : Math.max(0, requireNumber(body.speed, 'speed')),
       bearing: body?.bearing === undefined ? 0 : requireNumber(body.bearing, 'bearing'),
+      altitude: body?.altitude === undefined ? 0 : requireNumber(body.altitude, 'altitude'),
+      satellites: body?.satellites === undefined ? 12 : requireNumber(body.satellites, 'satellites'),
     });
   },
+
+  getLocation: (deviceId) => ActionEngine.getLocation(deviceId),
 
   simulateRoute(deviceId, body = {}) {
     const { points, intervalMs, loop } = body;
@@ -123,6 +128,7 @@ const actionService = {
       points,
       intervalMs: intervalMs === undefined ? 1500 : requireNumber(intervalMs, 'intervalMs'),
       loop: Boolean(loop),
+      speedKmh: body.speedKmh === undefined ? undefined : requireNumber(body.speedKmh, 'speedKmh'),
     });
   },
 

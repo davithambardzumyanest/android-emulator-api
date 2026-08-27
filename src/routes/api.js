@@ -120,6 +120,9 @@ router.post('/devices/:id/intent', wrap(async (req, res) => res.json(await actio
 // --- Location --------------------------------------------------------------
 
 router.post('/devices/:id/gps/set', wrap(async (req, res) => res.json(await actionService.setGPS(req.params.id, req.body || {}))));
+
+/** Read back what Android reports, to verify a fix actually landed. */
+router.get('/devices/:id/gps', wrap(async (req, res) => res.json(await actionService.getLocation(req.params.id))));
 router.post('/devices/:id/gps/route', wrap(async (req, res) => res.json(await actionService.simulateRoute(req.params.id, req.body || {}))));
 router.get('/devices/:id/gps/route', wrap(async (req, res) => res.json(actionService.listRoutes(req.params.id))));
 router.delete('/devices/:id/gps/route/:taskId', wrap(async (req, res) => res.json(actionService.stopRoute(req.params.id, req.params.taskId))));

@@ -7,6 +7,7 @@
 const { adbText, adbBuffer, shell, getProp } = require('../utils/adb');
 const ui = require('../utils/ui');
 const finder = require('../utils/finder');
+const geo = require('../utils/geo');
 const logger = require('../logger');
 
 function serialOf(device) {
@@ -220,41 +221,84 @@ module.exports = {
     };
   },
 
-  async setGPS(device, { lat, lon, speed = 0, bearing = 0 }) {
+  /**
+   * Inject a GPS fix.
+   *
+   * `geo fix <lon> <lat> [alt [satellites [velocity]]]` is the emulator's own
+   * documented syntax and velocity is in **knots**. The previous code sent only
+   * `geo fix <lon> <lat>`, so velocity was never supplied and every fix arrived
+   * with vel=0; the separate NMEA sentence it then sent was overwritten because
+   * the emulator keeps re-emitting its stored fix.
+   *
+   * Bearing has no `geo fix` parameter, so a $GPRMC sentence is sent for it.
+   * That is the only channel the emulator console offers (`geo nmea` accepts
+   * $GPGGA and $GPRMC only).
+   *
+   * @param {{lat:number, lon:number, speed?:number, bearing?:number,
+   *          altitude?:number, satellites?:number}} fix speed in m/s
+   */
+  async setGPS(device, { lat, lon, speed = 0, bearing = 0, altitude = 0, satellites = 12 }) {
     const serial = serialOf(device);
-    // `emu` is a console command, not a shell command — it must not be quoted
-    // for the device shell.
-    await adbText(serial, ['emu', 'geo', 'fix', String(lon), String(lat)]);
 
-    if (speed > 0 || bearing > 0) {
-      const normalizedBearing = ((bearing % 360) + 360) % 360;
-      const speedKnots = speed * 1.94384;
+    const knots = geo.metersPerSecondToKnots(Math.max(0, speed));
+    const sats = Math.min(12, Math.max(1, Math.round(satellites)));
 
-      // NMEA needs ddmm.mmmm, not decimal degrees — the old code sent decimal
-      // degrees, so any consumer parsing the sentence read the wrong position.
-      const toNmea = (value, degreeDigits) => {
-        const abs = Math.abs(value);
-        const degrees = Math.floor(abs);
-        const minutes = (abs - degrees) * 60;
-        return `${String(degrees).padStart(degreeDigits, '0')}${minutes.toFixed(4).padStart(7, '0')}`;
-      };
+    // `emu` is a console command, so it must not be quoted for the device shell.
+    await adbText(serial, [
+      'emu', 'geo', 'fix',
+      String(lon), String(lat),
+      String(Math.round(altitude)),
+      String(sats),
+      knots.toFixed(4),
+    ]);
 
-      const now = new Date();
-      const hhmmss = `${String(now.getUTCHours()).padStart(2, '0')}${String(now.getUTCMinutes()).padStart(2, '0')}${String(now.getUTCSeconds()).padStart(2, '0')}`;
-      const ddmmyy = `${String(now.getUTCDate()).padStart(2, '0')}${String(now.getUTCMonth() + 1).padStart(2, '0')}${String(now.getUTCFullYear() % 100).padStart(2, '0')}`;
-
-      const body = `GPRMC,${hhmmss},A,${toNmea(lat, 2)},${lat >= 0 ? 'N' : 'S'},`
-        + `${toNmea(lon, 3)},${lon >= 0 ? 'E' : 'W'},`
-        + `${speedKnots.toFixed(2)},${normalizedBearing.toFixed(2)},${ddmmyy},,,A`;
-
-      let checksum = 0;
-      for (let i = 0; i < body.length; i += 1) checksum ^= body.charCodeAt(i);
-
-      const sentence = `$${body}*${checksum.toString(16).toUpperCase().padStart(2, '0')}`;
+    // Only worth the extra round trip when there is a heading to convey.
+    if (bearing || speed) {
+      const sentence = geo.buildGprmc({ lat, lon, speedMps: speed, bearing });
       await adbText(serial, ['emu', 'geo', 'nmea', sentence], { check: false });
     }
 
-    return { ok: true, lat, lon };
+    return { ok: true, lat, lon, speed, bearing };
+  },
+
+  /**
+   * Read back the location Android actually reports.
+   * Lets callers verify that speed and bearing landed, rather than trusting
+   * that the injection worked.
+   */
+  async getLocation(device) {
+    const serial = serialOf(device);
+    const dump = await shell(serial, ['dumpsys', 'location'], { check: false, timeoutMs: 20000 });
+
+    const match = /last location=Location\[(\w+) ([-\d.]+),([-\d.]+)([^\]]*)\]/.exec(dump);
+    if (!match) {
+      return {
+        ok: true,
+        location: null,
+        // Without an app requesting location the provider stays stopped and
+        // never records a fix, so this is expected on an idle device.
+        note: 'No location recorded yet. Android only stores fixes while an app is requesting location.',
+      };
+    }
+
+    const extras = match[4];
+    const num = (key) => {
+      const m = new RegExp(`${key}=([-\\d.]+)`).exec(extras);
+      return m ? Number(m[1]) : null;
+    };
+
+    return {
+      ok: true,
+      location: {
+        provider: match[1],
+        lat: Number(match[2]),
+        lon: Number(match[3]),
+        speed: num('vel'),
+        bearing: num('bear'),
+        altitude: num('alt'),
+        accuracy: num('hAcc'),
+      },
+    };
   },
 
   /**

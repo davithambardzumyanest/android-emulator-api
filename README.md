@@ -121,8 +121,22 @@ from the response alone.
 - `GET /devices/:id/pageinfo` – foreground package/activity plus structured screen contents.
 
 ### Location
-- `POST /devices/:id/gps/set` – `{ "lat", "lon", "speed", "bearing" }`
-- `POST /devices/:id/gps/route` – `{ "points": [{lat,lon}], "intervalMs": 2000, "loop": false }`
+- `POST /devices/:id/gps/set` – `{ "lat", "lon", "speed", "bearing", "altitude", "satellites" }`
+  - `speed` is **metres per second** (converted to knots for the emulator).
+  - `bearing` is degrees clockwise from north.
+- `GET /devices/:id/gps` – read back the location Android actually reports
+  (provider, lat/lon, speed, bearing, accuracy), so you can verify a fix landed.
+  Returns `location: null` on an idle device: Android only records fixes while
+  an app is requesting location.
+- `POST /devices/:id/gps/route` – `{ "points": [{lat,lon}], "intervalMs": 1000, "speedKmh": 50, "loop": false }`
+  - Each fix carries the **speed and bearing implied by the movement**, so apps
+    reading `Location.getSpeed()`/`getBearing()` and navigation UIs that orient
+    by heading see a coherent drive.
+  - With `speedKmh` the route is resampled so every tick advances a realistic
+    distance. Without it, one waypoint is emitted per tick — with sparse
+    Directions polylines that means the device teleports and reports
+    implausible speeds.
+  - Per-point `speed`/`bearing` override the derived values.
 - `GET /devices/:id/gps/route` – list running route tasks.
 - `DELETE /devices/:id/gps/route/:taskId` – stop one.
 - `POST /devices/:id/navigate` – `{ "origin", "destination" }`; fetches a Google Directions route and drives GPS along it. Needs `GOOGLE_MAPS_API_KEY`.
@@ -173,6 +187,23 @@ adb -s emulator-5554 root && adb -s emulator-5554 remount
 
 This disables verity and slows the first boot, so it is off by default. The
 screen, hardware, sensor and behavioural realism above all apply either way.
+
+
+## GPS, speed and bearing
+
+Position and **speed** are injected with the emulator's documented
+`geo fix <lon> <lat> [alt [satellites [velocity]]]` (velocity in knots).
+
+**Bearing** has no `geo fix` parameter. The only channel the emulator console
+offers is `geo nmea`, which accepts `$GPGGA` and `$GPRMC` only, so a `$GPRMC`
+sentence carrying course-over-ground is sent alongside the fix. The emulator
+re-emits its stored fix periodically, so treat an injected bearing as
+best-effort rather than sticky.
+
+In practice this rarely matters for navigation: apps derive heading from
+consecutive positions, and `simulateRoute` now produces smooth, correctly-spaced
+movement with per-tick speed and bearing. Use `GET /devices/:id/gps` to confirm
+what the platform reports.
 
 
 ## Performance notes

@@ -8,6 +8,7 @@ const deviceManager = require('../devices/deviceManager');
 const android = require('../platforms/android');
 const ios = require('../platforms/ios');
 const logger = require('../logger');
+const geo = require('../utils/geo');
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -50,6 +51,7 @@ const ActionEngine = {
   intent: delegate('intent'),
   setGPS: delegate('setGPS'),
   getCurrentPageInfo: delegate('getCurrentPageInfo'),
+  getLocation: delegate('getLocation'),
   clickByText: delegate('clickByText'),
   waitForText: delegate('waitForText'),
   findElements: delegate('findElements'),
@@ -76,17 +78,31 @@ const ActionEngine = {
   },
 
   /**
-   * Drive GPS along a list of points.
-   * The handle is stored on the device so /gps/route/:taskId and cleanup can
-   * stop it; previously nothing could, and the interval outlived the device.
+   * Drive GPS along a route.
+   *
+   * Each emitted fix carries the speed and bearing implied by the movement, so
+   * apps reading Location.getSpeed()/getBearing() — and navigation UIs that
+   * orient by heading — see a coherent drive instead of a series of jumps with
+   * speed 0 and bearing 0.
+   *
+   * With `speedKmh` the route is resampled so every tick advances a realistic
+   * distance; without it, one waypoint is emitted per tick as before.
    */
-  async simulateRoute(deviceId, { points, intervalMs = 1500, loop = false }) {
+  async simulateRoute(deviceId, {
+    points, intervalMs = 1500, loop = false, speedKmh,
+  }) {
     const { device, controller } = resolve(deviceId, 'setGPS');
     if (!Array.isArray(points) || points.length === 0) {
       const e = new Error("'points' must be a non-empty array");
       e.status = 400;
       throw e;
     }
+
+    const tick = Math.max(200, intervalMs);
+    const path = speedKmh
+      ? geo.interpolateRoute(points, { speedKmh, intervalMs: tick })
+      : points;
+    const track = geo.annotateRoute(path, tick);
 
     if (!device.tasks.route) device.tasks.route = {};
     const taskId = `route-${Date.now()}`;
@@ -101,22 +117,22 @@ const ActionEngine = {
       }
     };
 
-    const tick = async () => {
-      // Skip if the previous tick is still in flight; setInterval does not
-      // wait for async work and adb calls can outlast a short interval.
+    const step = async () => {
+      // setInterval does not wait for async work, and an adb round trip can
+      // outlast a short tick; skipping keeps the route from running ahead.
       if (running) return;
       running = true;
       try {
-        const point = points[index];
+        const point = track[index];
         await controller.setGPS(device, {
           lat: point.lat,
           lon: point.lon,
-          speed: point.speed || 0,
-          bearing: point.bearing || 0,
+          speed: point.speed,
+          bearing: point.bearing,
         });
 
         index += 1;
-        if (index >= points.length) {
+        if (index >= track.length) {
           if (loop) index = 0;
           else stop();
         }
@@ -128,10 +144,25 @@ const ActionEngine = {
       }
     };
 
-    device.tasks.route[taskId] = setInterval(tick, Math.max(200, intervalMs));
-    tick(); // Emit the first point immediately instead of after one interval.
+    device.tasks.route[taskId] = setInterval(step, tick);
+    step(); // Emit the first fix now rather than after one tick.
 
-    return { ok: true, taskId, points: points.length, intervalMs, loop };
+    const meters = track.reduce(
+      (sum, p, i) => (i ? sum + geo.distanceMeters(track[i - 1], p) : 0),
+      0,
+    );
+
+    return {
+      ok: true,
+      taskId,
+      points: track.length,
+      waypoints: points.length,
+      intervalMs: tick,
+      loop,
+      distanceMeters: Math.round(meters),
+      estimatedDurationSec: Math.round((track.length * tick) / 1000),
+      speedKmh: speedKmh || null,
+    };
   },
 
   stopRoute(deviceId, taskId) {
