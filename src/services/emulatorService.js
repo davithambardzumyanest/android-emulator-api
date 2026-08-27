@@ -433,8 +433,12 @@ class EmulatorService {
       // answer with a network fix derived from Wi-Fi or the exit IP, which on a
       // proxied device points at a different country than the injected fix —
       // and Maps then plans a route from there.
-      await run('providers: gps only', ['settings', 'put', 'secure', 'location_providers_allowed', '-network']);
-      await run('providers: +gps', ['settings', 'put', 'secure', 'location_providers_allowed', '+gps']);
+      //
+      // Written as a plain value: the '+gps' / '-network' prefix syntax was
+      // special-cased by old LocationManager versions, but on Android 13 this
+      // is an ordinary string write and the prefixes end up stored literally
+      // (verified: the setting read back as the string "+gps").
+      await run('providers: gps only', ['settings', 'put', 'secure', 'location_providers_allowed', 'gps']);
       // Google Location Accuracy (the NLP consent) feeds the network provider.
       await put('secure', 'network_location_opt_in', 0);
       await put('global', 'wifi_scan_always_enabled', 0);
@@ -475,7 +479,9 @@ class EmulatorService {
     // Only touched when the caller asked for a specific value — see the note
     // in config.js on why a default here does more harm than good.
     if (settings.timezone) {
-      await run('timezone', ['setprop', 'persist.sys.timezone', settings.timezone]);
+      const set = await this.setTimezone(serial, settings.timezone);
+      if (set.ok) applied.push(`timezone=${settings.timezone}`);
+      else failed.push(`timezone: ${set.reason}`);
     }
     if (settings.locale) {
       // Stored now, but only takes effect on the next boot: Android has no way
@@ -503,6 +509,35 @@ class EmulatorService {
     if (failed.length) logger.debug({ serial, failed }, 'some device settings failed');
 
     return { settings, applied, failed };
+  }
+
+  /**
+   * Set the device timezone, verifying it actually took.
+   *
+   * `setprop persist.sys.timezone` silently does nothing as the shell user —
+   * the property is owned by the system — so the plain call is tried first and
+   * then escalated through `su` on userdebug images. The result is read back
+   * rather than assumed, because the failure is otherwise invisible.
+   */
+  async setTimezone(serial, timezone) {
+    const attempts = [
+      ['setprop', 'persist.sys.timezone', timezone],
+      ['su', '0', 'setprop', 'persist.sys.timezone', timezone],
+    ];
+
+    for (const parts of attempts) {
+      // eslint-disable-next-line no-await-in-loop
+      await shell(serial, parts, { check: false }).catch(() => '');
+      // eslint-disable-next-line no-await-in-loop
+      const actual = await getProp(serial, 'persist.sys.timezone');
+      if (actual === timezone) return { ok: true, timezone };
+    }
+
+    const actual = await getProp(serial, 'persist.sys.timezone');
+    return {
+      ok: false,
+      reason: `still ${actual || 'unset'} (needs a rooted or userdebug image)`,
+    };
   }
 
   /** Grant a permission, ignoring "not a changeable permission" noise. */
