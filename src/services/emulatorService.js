@@ -472,10 +472,16 @@ class EmulatorService {
 
     // Timezone and locale should agree with where the device claims to be;
     // a mismatch is both unrealistic and confuses region-sensitive apps.
-    await run('timezone', ['setprop', 'persist.sys.timezone', settings.timezone]);
-    // Locale is stored now but only takes effect on the next boot; Android has
-    // no way to switch it live from the shell.
-    await run('locale (next boot)', ['setprop', 'persist.sys.locale', settings.locale]);
+    // Only touched when the caller asked for a specific value — see the note
+    // in config.js on why a default here does more harm than good.
+    if (settings.timezone) {
+      await run('timezone', ['setprop', 'persist.sys.timezone', settings.timezone]);
+    }
+    if (settings.locale) {
+      // Stored now, but only takes effect on the next boot: Android has no way
+      // to switch locale live from the shell.
+      await run('locale (next boot)', ['setprop', 'persist.sys.locale', settings.locale]);
+    }
     await put('system', 'screen_brightness_mode', 1);
 
     // A freshly-flashed device has setup completed; leaving these at 0 leaves

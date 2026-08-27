@@ -86,8 +86,8 @@ All bodies are JSON.
   "proxy": "http://user:pass@host:port",
 
   "settings": {
-    "timezone": "America/New_York",   // should match where the GPS says you are
-    "locale": "en-US",                // takes effect on the next boot
+    "timezone": "America/New_York",   // omit to leave the image's own
+    "locale": "en-US",                // omit to leave it; applies on next boot
     "gpsOnly": true,                  // ignore network/Wi-Fi location (see below)
     "wifi": false,                    // Wi-Fi also feeds network location
     "mobileData": true,
@@ -265,7 +265,9 @@ call returns only once the platform agrees.
 
 Keep `settings.timezone` consistent with the coordinates you inject — a device
 in New York reporting Yerevan time is both unrealistic and confuses
-region-sensitive apps.
+region-sensitive apps. Neither timezone nor locale is set unless you ask for
+one: imposing a default that disagrees with your coordinates causes the very
+problem it looks like it should prevent.
 
 ```bash
 # 50 km/h along a route, one fix per second

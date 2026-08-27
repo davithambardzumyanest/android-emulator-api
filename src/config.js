@@ -100,8 +100,13 @@ const config = {
   device: {
     // Hardware profile applied to new/patched AVDs; see src/devices/profiles.js
     profile: process.env.DEVICE_PROFILE || 'pixel_5',
-    locale: process.env.DEVICE_LOCALE || 'en-US',
-    timezone: process.env.DEVICE_TIMEZONE || 'America/New_York',
+    // Unset by default. Forcing a timezone or locale that disagrees with the
+    // coordinates you inject is worse than leaving the image's own: a device
+    // reporting New York time while its GPS sits in Yerevan is both
+    // unrealistic and confuses region-sensitive apps. Set these explicitly,
+    // per device, to match where the device claims to be.
+    locale: process.env.DEVICE_LOCALE || null,
+    timezone: process.env.DEVICE_TIMEZONE || null,
     batteryLevel: int(process.env.DEVICE_BATTERY_LEVEL, 87),
     // The device must not fall asleep: a dark screen breaks every UI query.
     // 24h by default; lower it only if you want the device to sleep.

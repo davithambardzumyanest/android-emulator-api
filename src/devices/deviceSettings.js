@@ -28,8 +28,9 @@ function resolve(overrides = {}) {
   const o = overrides || {};
 
   return {
-    locale: str(o.locale, config.device.locale),
-    timezone: str(o.timezone, config.device.timezone),
+    // null means "leave the image's own value alone".
+    locale: str(o.locale, config.device.locale) || null,
+    timezone: str(o.timezone, config.device.timezone) || null,
     batteryLevel: num(o.batteryLevel, config.device.batteryLevel, { min: 1, max: 100 }),
     batteryCharging: bool(o.batteryCharging, false),
     disableAnimations: bool(o.disableAnimations, config.device.disableAnimations),
