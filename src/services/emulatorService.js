@@ -413,6 +413,15 @@ class EmulatorService {
     // uiautomator return "null root node", breaking every UI query underneath.
     await put('secure', 'immersive_mode_confirmations', 'confirmed');
 
+    // Disable the lock screen outright. After a wipe boot the device comes up
+    // locked ("Unlock for all features and data") and sits there: intents land
+    // behind the keyguard, so launching an app appears to do nothing. A single
+    // `wm dismiss-keyguard` is not enough because the keyguard returns on the
+    // next screen-off.
+    await run('disable lockscreen', ['locksettings', 'set-disabled', 'true']);
+    await put('secure', 'lockscreen.disabled', 1);
+    await run('swipe away keyguard', ['input', 'keyevent', 'KEYCODE_MENU']);
+
     // --- Realism -----------------------------------------------------------
     // A real phone is not sitting at 100% on AC forever.
     await run('battery level', ['dumpsys', 'battery', 'set', 'level', String(config.device.batteryLevel)]);
