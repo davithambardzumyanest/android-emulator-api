@@ -191,19 +191,32 @@ screen, hardware, sensor and behavioural realism above all apply either way.
 
 ## GPS, speed and bearing
 
-Position and **speed** are injected with the emulator's documented
-`geo fix <lon> <lat> [alt [satellites [velocity]]]` (velocity in knots).
+**Position and speed work.** Both are injected with the emulator's documented
+`geo fix <lon> <lat> [alt [satellites [velocity]]]`, velocity in knots. Verified
+on a device: setting 13.9 m/s reads back as `speed: 13.900277`, 27.8 m/s as
+`27.800554`. (Before this, velocity was never supplied and every fix arrived
+with `speed: 0`.)
 
-**Bearing** has no `geo fix` parameter. The only channel the emulator console
-offers is `geo nmea`, which accepts `$GPGGA` and `$GPRMC` only, so a `$GPRMC`
-sentence carrying course-over-ground is sent alongside the fix. The emulator
-re-emits its stored fix periodically, so treat an injected bearing as
-best-effort rather than sticky.
+**Bearing cannot be injected** on emulator 36.4.9.0. `geo fix` has no bearing
+parameter, and `geo nmea` — the console's only other channel — is a no-op: it
+answers `OK` but the fix does not change at all, not even the position given in
+the sentence. `Location.getBearing()` therefore stays `0`. `setGPS` returns
+`bearingApplied: false` rather than letting you assume otherwise. The GPRMC path
+is kept behind `EMULATOR_GPS_NMEA=true` for builds that do honour NMEA.
 
-In practice this rarely matters for navigation: apps derive heading from
-consecutive positions, and `simulateRoute` now produces smooth, correctly-spaced
-movement with per-tick speed and bearing. Use `GET /devices/:id/gps` to confirm
-what the platform reports.
+This does not block navigation. Maps and other apps derive heading from
+consecutive positions, and `simulateRoute` produces smooth, correctly-spaced
+movement at a realistic speed. Use `GET /devices/:id/gps` to confirm what the
+platform actually reports.
+
+```bash
+# 50 km/h along a route, one fix per second
+curl -X POST localhost:3000/devices/$ID/gps/route -H 'Content-Type: application/json' \
+  -d '{"points":[{"lat":40.758,"lon":-73.9855},{"lat":40.7484,"lon":-73.9857}],
+       "speedKmh":50,"intervalMs":1000}'
+
+curl localhost:3000/devices/$ID/gps   # verify what Android reports
+```
 
 
 ## Performance notes

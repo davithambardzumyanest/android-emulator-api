@@ -8,6 +8,7 @@ const { adbText, adbBuffer, shell, getProp } = require('../utils/adb');
 const ui = require('../utils/ui');
 const finder = require('../utils/finder');
 const geo = require('../utils/geo');
+const config = require('../config');
 const logger = require('../logger');
 
 function serialOf(device) {
@@ -230,9 +231,12 @@ module.exports = {
    * with vel=0; the separate NMEA sentence it then sent was overwritten because
    * the emulator keeps re-emitting its stored fix.
    *
-   * Bearing has no `geo fix` parameter, so a $GPRMC sentence is sent for it.
-   * That is the only channel the emulator console offers (`geo nmea` accepts
-   * $GPGGA and $GPRMC only).
+   * Bearing is NOT delivered to the platform. `geo fix` has no bearing
+   * parameter, and `geo nmea` - the console's only other channel - is a no-op
+   * on emulator 36.4.9.0: it answers OK but the fix does not change, so
+   * Location.getBearing() stays 0. Apps derive heading from consecutive
+   * positions instead, which is what simulateRoute produces. The GPRMC path is
+   * kept behind EMULATOR_GPS_NMEA for builds that do honour it.
    *
    * @param {{lat:number, lon:number, speed?:number, bearing?:number,
    *          altitude?:number, satellites?:number}} fix speed in m/s
@@ -252,13 +256,22 @@ module.exports = {
       knots.toFixed(4),
     ]);
 
-    // Only worth the extra round trip when there is a heading to convey.
-    if (bearing || speed) {
+    // Skipped by default: it does nothing on current emulator builds and
+    // doubles the adb round trips during route playback.
+    if (config.emulator.gpsNmea && (bearing || speed)) {
       const sentence = geo.buildGprmc({ lat, lon, speedMps: speed, bearing });
       await adbText(serial, ['emu', 'geo', 'nmea', sentence], { check: false });
     }
 
-    return { ok: true, lat, lon, speed, bearing };
+    return {
+      ok: true,
+      lat,
+      lon,
+      speed,
+      bearing,
+      // Be explicit rather than letting callers assume bearing was applied.
+      bearingApplied: false,
+    };
   },
 
   /**

@@ -87,6 +87,12 @@ const config = {
     // 'lte' models a real mobile link; 'fast' is the unthrottled emulator default.
     netProfile: (process.env.EMULATOR_NET_PROFILE || 'lte').toLowerCase(),
     audio: bool(process.env.EMULATOR_AUDIO, false),
+    // Also send a $GPRMC sentence with each fix. Off by default: emulator
+    // 36.4.9.0 accepts `geo nmea` and answers OK but ignores it entirely
+    // (verified - the position does not even move to the one in the sentence),
+    // so it is a wasted adb round trip on every fix. Enable if your emulator
+    // build honours NMEA.
+    gpsNmea: bool(process.env.EMULATOR_GPS_NMEA, false),
     // Unset => let the AVD's config.ini decide (virtualscene back, emulated front).
     camera: process.env.EMULATOR_CAMERA || '',
   },
