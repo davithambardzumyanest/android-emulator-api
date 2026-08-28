@@ -70,11 +70,26 @@ function buildGprmc({ lat, lon, speedMps = 0, bearing = 0, date = new Date() }) 
   return `$${body}*${checksum.toString(16).toUpperCase().padStart(2, '0')}`;
 }
 
+// No car drives faster than this. Speed is derived from the gap between
+// consecutive route points, so a sparse polyline — Google's overview_polyline
+// can put a kilometre between points — implies speeds in the hundreds of km/h.
+// Reporting those to a navigation app is worse than reporting nothing: Maps
+// stops snapping the fix to a road and reroutes on every tick. Resample with
+// `speedKmh` to actually move at a sane pace; this cap only stops the reported
+// value being nonsense in the meantime.
+const PLAUSIBLE_MAX_SPEED_MPS = 70; // 252 km/h
+
 /**
  * Annotate route points with the speed and bearing implied by travelling
  * between them at `intervalMs` per leg. Explicit values on a point win.
+ *
+ * @param {Array} points
+ * @param {number} intervalMs
+ * @param {{maxSpeedMps?:number}} [opts]
+ * @returns {Array} points with `speed`, `bearing` and, where the derived speed
+ *   was capped, `speedClamped: <the implausible original>`
  */
-function annotateRoute(points, intervalMs) {
+function annotateRoute(points, intervalMs, { maxSpeedMps = PLAUSIBLE_MAX_SPEED_MPS } = {}) {
   const seconds = Math.max(0.001, intervalMs / 1000);
 
   return points.map((point, i) => {
@@ -88,16 +103,21 @@ function annotateRoute(points, intervalMs) {
       else bearing = 0;
     }
 
-    let speed = point.speed;
-    if (speed === undefined) {
-      // Speed for a leg is the distance to the next point over the interval;
-      // the final point inherits the previous leg's speed rather than stopping
-      // dead, which is what a vehicle arriving actually looks like.
-      if (next) speed = distanceMeters(point, next) / seconds;
-      else if (prev) speed = distanceMeters(prev, point) / seconds;
-      else speed = 0;
-    }
+    // An explicit speed on the point is the caller's business; only a speed we
+    // derived from the geometry is capped.
+    if (point.speed !== undefined) return { ...point, speed: point.speed, bearing };
 
+    // Speed for a leg is the distance to the next point over the interval;
+    // the final point inherits the previous leg's speed rather than stopping
+    // dead, which is what a vehicle arriving actually looks like.
+    let speed;
+    if (next) speed = distanceMeters(point, next) / seconds;
+    else if (prev) speed = distanceMeters(prev, point) / seconds;
+    else speed = 0;
+
+    if (speed > maxSpeedMps) {
+      return { ...point, speed: maxSpeedMps, bearing, speedClamped: speed };
+    }
     return { ...point, speed, bearing };
   });
 }
@@ -153,6 +173,7 @@ function interpolateRoute(points, { speedKmh, intervalMs, maxPoints = 20000 }) {
 }
 
 module.exports = {
+  PLAUSIBLE_MAX_SPEED_MPS,
   distanceMeters,
   bearingDegrees,
   metersPerSecondToKnots,

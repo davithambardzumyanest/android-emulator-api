@@ -89,7 +89,9 @@ All bodies are JSON.
     "timezone": "America/New_York",   // omit to leave the image's own
     "locale": "en-US",                // omit to leave it; applies on next boot
     "gpsOnly": true,                  // ignore network/Wi-Fi location (see below)
-    "wifi": false,                    // Wi-Fi also feeds network location
+    "wifi": false,                    // off keeps traffic on the proxied mobile
+                                      // link; restored automatically if that
+                                      // leaves the device with no network
     "mobileData": true,
     "locationMode": 3,
     "batteryLevel": 87,
@@ -170,12 +172,24 @@ from the response alone.
     by heading see a coherent drive.
   - With `speedKmh` the route is resampled so every tick advances a realistic
     distance. Without it, one waypoint is emitted per tick — with sparse
-    Directions polylines that means the device teleports and reports
-    implausible speeds.
-  - Per-point `speed`/`bearing` override the derived values.
+    Directions polylines that means the device teleports, so the derived speed
+    is capped at 252 km/h and the response reports `clampedPoints`. A non-zero
+    `clampedPoints` means your points are too far apart for `intervalMs`: pass
+    `speedKmh`.
+  - Per-point `speed`/`bearing` override the derived values and are never capped.
 - `GET /devices/:id/gps/route` – list running route tasks.
 - `DELETE /devices/:id/gps/route/:taskId` – stop one.
-- `POST /devices/:id/navigate` – `{ "origin", "destination" }`; fetches a Google Directions route and drives GPS along it. Needs `GOOGLE_MAPS_API_KEY`.
+- `POST /devices/:id/navigate` – `{ "origin", "destination", "speedKmh": 50,
+  "intervalMs": 2000, "mode": "driving", "openMaps": true, "loop": false,
+  "waitForFix": true, "mapsSettleMs": 6000 }`; fetches a Google Directions route
+  and drives GPS along it. Needs `GOOGLE_MAPS_API_KEY`.
+  - Uses the route's **per-step** polylines, not `overview_polyline`: the
+    overview is simplified for drawing and cuts corners across buildings.
+  - Seeds the start position and waits for the platform to report it *before*
+    firing the navigation intent, then waits for Maps to reach the foreground
+    before playback starts. Otherwise the first stretch of the drive is
+    delivered to an app still on its splash screen.
+  - `speedKmh` defaults to 50, so the route is always resampled.
 
 ### Capture
 - `GET|POST /devices/:id/screenshot` – PNG.
@@ -254,9 +268,20 @@ network fix derived from Wi-Fi, cell and the exit IP. On a proxied emulator thos
 disagree — the injected fix says one country, Google's network lookup says
 wherever the proxy exits — and an app may believe the network one. `gpsOnly`
 (default **on**) removes the second opinion: it drops the network provider, turns
-off Google Location Accuracy, disables Wi-Fi scanning and turns Wi-Fi off, so the
-injected fix is the only location available. Set `"gpsOnly": false` to restore
-the blended behaviour.
+off Google Location Accuracy and disables Wi-Fi scanning, so the injected fix is
+the only location available. Set `"gpsOnly": false` to restore the blended
+behaviour.
+
+**Careful with the radios.** `wifi` defaults to **off** so the guest's traffic
+goes out over the emulated mobile link, which is the path `-http-proxy` actually
+proxies. That is one `svc` call away from a device with no network at all —
+whether the emulated modem brings a data connection up depends on the system
+image — and a navigation app with no network shows a blank grid and never
+routes, which looks exactly like a broken emulator. After configuring the radios
+the device is checked for a default route; if there is none, Wi-Fi is turned
+back on and both the log and `settings.network` in the register response say so
+(`wifiRestored: true` means traffic on that interface may bypass the emulator
+proxy). Set `"wifi": true` if you would rather not have Wi-Fi toggled at all.
 
 **Racing the fix.** Injecting a location is asynchronous. A navigation intent
 sent immediately afterwards is planned from the previous position. Use

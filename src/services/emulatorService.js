@@ -454,8 +454,19 @@ class EmulatorService {
       await run(`grant coarse to ${pkg}`, ['pm', 'grant', pkg, 'android.permission.ACCESS_COARSE_LOCATION']);
     }
 
+    // --- Radios ------------------------------------------------------------
+    // Wi-Fi is off by default so the guest's traffic goes out over the
+    // emulated mobile link, which is the path `-http-proxy` actually proxies.
+    // That is deliberate, but it is one `svc` call away from a device with no
+    // network at all — and a navigation app with no network cannot fetch tiles
+    // or plan a route, which looks exactly like "the emulator is broken".
+    // ensureConnectivity below checks rather than assumes.
     await run(settings.wifi ? 'wifi on' : 'wifi off', ['svc', 'wifi', settings.wifi ? 'enable' : 'disable']);
     await run(settings.mobileData ? 'mobile data on' : 'mobile data off', ['svc', 'data', settings.mobileData ? 'enable' : 'disable']);
+
+    const network = await this.ensureConnectivity(serial, settings);
+    if (network.online) applied.push(`network via ${network.via}`);
+    else failed.push(`network: ${network.reason}`);
 
     // --- Realism -----------------------------------------------------------
     if (settings.batteryCharging) {
@@ -503,12 +514,66 @@ class EmulatorService {
     await put('global', 'animator_duration_scale', scale);
 
     logger.info(
-      { serial, applied: applied.length, failed: failed.length, gpsOnly: settings.gpsOnly },
+      { serial, applied: applied.length, failed: failed.length, gpsOnly: settings.gpsOnly, online: network.online },
       'device configured',
     );
     if (failed.length) logger.debug({ serial, failed }, 'some device settings failed');
 
-    return { settings, applied, failed };
+    return { settings, applied, failed, network };
+  }
+
+  /**
+   * Confirm the guest still has a route to the internet after the radios were
+   * configured, and put Wi-Fi back if it does not.
+   *
+   * Turning Wi-Fi off is how traffic is kept on the proxied mobile link, but
+   * whether the emulated modem brings a data connection up at all depends on
+   * the system image and on the AVD's `hw.gsmModem`. When it does not, the
+   * device is left with no network whatsoever: Maps opens to a blank grid and
+   * never routes. Restoring Wi-Fi trades exact proxy routing for a device that
+   * works, and says so loudly rather than leaving it to be discovered from a
+   * screenshot.
+   */
+  async ensureConnectivity(serial, settings, { attempts = 6, delayMs = 2000 } = {}) {
+    const probe = async () => {
+      // `ip route` needs no system service, so it answers while the framework
+      // is still settling — unlike `dumpsys connectivity`.
+      const routes = await shell(serial, ['ip', 'route'], { check: false, timeoutMs: 10000 })
+        .catch(() => '');
+      const match = /^default\b.*\bdev\s+(\S+)/m.exec(routes);
+      return match ? match[1] : null;
+    };
+
+    for (let i = 0; i < attempts; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      const iface = await probe();
+      if (iface) return { online: true, via: iface, wifiRestored: false };
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(delayMs);
+    }
+
+    if (settings.wifi) {
+      return { online: false, via: null, wifiRestored: false, reason: 'no default route (Wi-Fi already on)' };
+    }
+
+    logger.warn({ serial }, 'no default route with Wi-Fi off; re-enabling Wi-Fi so the device has a network');
+    await shell(serial, ['svc', 'wifi', 'enable'], { check: false }).catch(() => '');
+
+    for (let i = 0; i < attempts; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(delayMs);
+      // eslint-disable-next-line no-await-in-loop
+      const iface = await probe();
+      if (iface) {
+        logger.warn(
+          { serial, iface },
+          'Wi-Fi restored to give the device a network; traffic on this interface may bypass the emulator proxy',
+        );
+        return { online: true, via: iface, wifiRestored: true };
+      }
+    }
+
+    return { online: false, via: null, wifiRestored: true, reason: 'no default route on either radio' };
   }
 
   /**

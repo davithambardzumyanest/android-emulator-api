@@ -86,7 +86,10 @@ const ActionEngine = {
    * speed 0 and bearing 0.
    *
    * With `speedKmh` the route is resampled so every tick advances a realistic
-   * distance; without it, one waypoint is emitted per tick as before.
+   * distance; without it, one waypoint is emitted per tick as before, and the
+   * derived speed is capped at a plausible maximum. Passing a raw Directions
+   * polyline without `speedKmh` is what makes a device appear to teleport: the
+   * response reports `clampedPoints` so that is visible rather than silent.
    */
   async simulateRoute(deviceId, {
     points, intervalMs = 1500, loop = false, speedKmh,
@@ -103,25 +106,38 @@ const ActionEngine = {
       ? geo.interpolateRoute(points, { speedKmh, intervalMs: tick })
       : points;
     const track = geo.annotateRoute(path, tick);
+    const clampedPoints = track.filter((p) => p.speedClamped !== undefined).length;
+
+    if (clampedPoints) {
+      logger.warn(
+        { deviceId, clampedPoints, total: track.length, intervalMs: tick },
+        'route points are too far apart for this interval; reported speed capped — pass speedKmh to resample',
+      );
+    }
 
     if (!device.tasks.route) device.tasks.route = {};
     const taskId = `route-${Date.now()}`;
     let index = 0;
-    let running = false;
+    let timer = null;
+    let stopped = false;
 
     const stop = () => {
-      const handle = device.tasks.route[taskId];
-      if (handle) {
-        clearInterval(handle);
-        delete device.tasks.route[taskId];
-      }
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      timer = null;
+      delete device.tasks.route[taskId];
     };
 
+    // Self-scheduling rather than setInterval: an adb round trip costs a
+    // meaningful fraction of a short tick, and setInterval does not wait for
+    // async work. The old loop skipped any tick that overlapped the previous
+    // one, so playback ran slower than the speed each fix claimed — an
+    // inconsistency a navigation app notices. Subtracting the elapsed time
+    // keeps the real pace matching the reported one.
     const step = async () => {
-      // setInterval does not wait for async work, and an adb round trip can
-      // outlast a short tick; skipping keeps the route from running ahead.
-      if (running) return;
-      running = true;
+      if (stopped) return;
+      const startedAt = Date.now();
+
       try {
         const point = track[index];
         await controller.setGPS(device, {
@@ -134,17 +150,22 @@ const ActionEngine = {
         index += 1;
         if (index >= track.length) {
           if (loop) index = 0;
-          else stop();
+          else { stop(); return; }
         }
       } catch (e) {
         logger.error({ deviceId, taskId, err: e.message }, 'route simulation stopped');
         stop();
-      } finally {
-        running = false;
+        return;
       }
+
+      if (stopped) return;
+      timer = setTimeout(step, Math.max(0, tick - (Date.now() - startedAt)));
+      // A pending fix must not hold the process open on shutdown.
+      if (typeof timer.unref === 'function') timer.unref();
+      device.tasks.route[taskId] = { stop };
     };
 
-    device.tasks.route[taskId] = setInterval(step, tick);
+    device.tasks.route[taskId] = { stop };
     step(); // Emit the first fix now rather than after one tick.
 
     const meters = track.reduce(
@@ -162,6 +183,7 @@ const ActionEngine = {
       distanceMeters: Math.round(meters),
       estimatedDurationSec: Math.round((track.length * tick) / 1000),
       speedKmh: speedKmh || null,
+      clampedPoints,
     };
   },
 
@@ -173,8 +195,7 @@ const ActionEngine = {
       e.status = 404;
       throw e;
     }
-    clearInterval(handle);
-    delete device.tasks.route[taskId];
+    handle.stop();
     return { ok: true, taskId, stopped: true };
   },
 

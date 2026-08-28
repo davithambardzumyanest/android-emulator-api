@@ -123,8 +123,10 @@ const config = {
     // with the injected position whenever the device is behind a proxy in a
     // different country — and apps then route from the wrong origin.
     gpsOnly: bool(process.env.DEVICE_GPS_ONLY, true),
-    // Wi-Fi feeds the network location provider; a phone navigating in a car
-    // is on mobile data anyway.
+    // Wi-Fi off keeps the guest's traffic on the emulated mobile link, which is
+    // the path `-http-proxy` actually proxies. emulatorService.ensureConnectivity
+    // puts it back if that leaves the device with no default route — a device
+    // with no network cannot load a map, however clean its location is.
     wifi: bool(process.env.DEVICE_WIFI, false),
   },
 

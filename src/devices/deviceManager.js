@@ -113,8 +113,8 @@ class DeviceManager {
 
   /**
    * Stop every background task on a device.
-   * Route simulations run on setInterval; clearing the registry without
-   * clearing them left timers firing GPS updates forever.
+   * Route simulations reschedule themselves after each fix; clearing the
+   * registry without stopping them left timers firing GPS updates forever.
    */
   clearTasks(id) {
     const device = this.get(id);
@@ -122,7 +122,9 @@ class DeviceManager {
     let cleared = 0;
     for (const group of Object.values(device.tasks)) {
       for (const [taskId, handle] of Object.entries(group || {})) {
-        clearInterval(handle);
+        // Handles expose stop(); older raw timer handles are cleared directly.
+        if (typeof handle?.stop === 'function') handle.stop();
+        else clearTimeout(handle);
         delete group[taskId];
         cleared += 1;
       }
