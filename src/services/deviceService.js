@@ -56,6 +56,8 @@ const deviceService = {
       };
       meta.profile = started.profile;
       meta.settings = started.settings;
+      // Whether the guest actually has a route out, checked rather than assumed.
+      meta.network = started.network;
       // The emulator proxies the guest's traffic itself, credentials included.
       meta.emulatorProxy = Boolean(proxy);
     } else if (platform === 'android' && meta.deviceId && settings) {
@@ -64,6 +66,7 @@ const deviceService = {
       if (live.includes(meta.deviceId)) {
         const applied = await emulatorService.configureDevice(meta.deviceId, profile, settings);
         meta.settings = applied.settings;
+        meta.network = applied.network;
       }
     }
 

@@ -320,6 +320,7 @@ class EmulatorService {
       bootMs,
       profile: profileResult,
       settings: configured.settings,
+      network: configured.network,
       command: `emulator ${args.join(' ')}`,
     };
   }

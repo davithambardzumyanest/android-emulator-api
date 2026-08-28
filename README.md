@@ -277,8 +277,8 @@ goes out over the emulated mobile link, which is the path `-http-proxy` actually
 proxies. On a healthy emulator the modem still brings up a default route and the
 device is fine — but a navigation app on a device with no network shows a blank
 grid and never routes, which looks exactly like a broken emulator. After
-configuring the radios the device is checked and the result reported in
-`settings.network` on the register response.
+configuring the radios the device is checked and the result stored as
+`meta.network` on the device (`GET /devices/:id`).
 
 Wi-Fi is **not** turned back on automatically when the check fails: the emulated
 Wi-Fi does not go through `-http-proxy`, so restoring it would route traffic out
