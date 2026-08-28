@@ -524,24 +524,42 @@ class EmulatorService {
 
   /**
    * Confirm the guest still has a route to the internet after the radios were
-   * configured, and put Wi-Fi back if it does not.
+   * configured, and report when it does not.
    *
-   * Turning Wi-Fi off is how traffic is kept on the proxied mobile link, but
-   * whether the emulated modem brings a data connection up at all depends on
-   * the system image and on the AVD's `hw.gsmModem`. When it does not, the
-   * device is left with no network whatsoever: Maps opens to a blank grid and
-   * never routes. Restoring Wi-Fi trades exact proxy routing for a device that
-   * works, and says so loudly rather than leaving it to be discovered from a
-   * screenshot.
+   * Turning Wi-Fi off is how traffic is kept on the proxied mobile link. On a
+   * healthy emulator the modem still brings up a default route and the device
+   * is fine — verified on this host: `default via 10.0.2.2 dev eth0` with
+   * Wi-Fi off and ICMP to 8.8.8.8 answering.
+   *
+   * Two things make this easy to get wrong, both learned the hard way:
+   *
+   *  - Android uses **policy routing**. Per-network routes live in numbered
+   *    tables (1015 for the emulated modem), so plain `ip route` shows only a
+   *    link-scope subnet line and looks exactly like a device with no network.
+   *    `ip route show table all` is the only honest question.
+   *  - `dummy0` carries a default route on every Android device as a blackhole
+   *    for the "no network" case. Counting it as connectivity means never
+   *    detecting the failure at all.
+   *
+   * Wi-Fi is NOT re-enabled automatically: on a proxied device the emulated
+   * Wi-Fi does not go through `-http-proxy`, so silently restoring it would
+   * route traffic straight out of the host's own IP — for proxy-dependent
+   * automation that is worse than a device with no network. Pass
+   * `restoreWifiIfOffline: true` to opt into the trade.
    */
-  async ensureConnectivity(serial, settings, { attempts = 6, delayMs = 2000 } = {}) {
+  async ensureConnectivity(serial, settings, { attempts = 5, delayMs = 2000 } = {}) {
+    // Interfaces that never mean real connectivity.
+    const isReal = (iface) => iface && !/^(dummy\d*|lo)$/.test(iface);
+
     const probe = async () => {
-      // `ip route` needs no system service, so it answers while the framework
-      // is still settling — unlike `dumpsys connectivity`.
-      const routes = await shell(serial, ['ip', 'route'], { check: false, timeoutMs: 10000 })
+      const routes = await shell(serial, ['ip', 'route', 'show', 'table', 'all'], { check: false, timeoutMs: 15000 })
         .catch(() => '');
-      const match = /^default\b.*\bdev\s+(\S+)/m.exec(routes);
-      return match ? match[1] : null;
+      for (const line of routes.split(/\r?\n/)) {
+        if (!/^default\b/.test(line.trim())) continue;
+        const dev = /\bdev\s+(\S+)/.exec(line);
+        if (dev && isReal(dev[1])) return dev[1];
+      }
+      return null;
     };
 
     for (let i = 0; i < attempts; i += 1) {
@@ -556,7 +574,21 @@ class EmulatorService {
       return { online: false, via: null, wifiRestored: false, reason: 'no default route (Wi-Fi already on)' };
     }
 
-    logger.warn({ serial }, 'no default route with Wi-Fi off; re-enabling Wi-Fi so the device has a network');
+    if (!settings.restoreWifiIfOffline) {
+      logger.warn(
+        { serial },
+        'device has no default route with Wi-Fi off — an app needing the network will fail. '
+        + 'Not enabling Wi-Fi: it bypasses the emulator proxy. Set restoreWifiIfOffline to override.',
+      );
+      return {
+        online: false,
+        via: null,
+        wifiRestored: false,
+        reason: 'no default route with Wi-Fi off; not restored because Wi-Fi bypasses the emulator proxy',
+      };
+    }
+
+    logger.warn({ serial }, 'no default route with Wi-Fi off; re-enabling Wi-Fi as asked');
     await shell(serial, ['svc', 'wifi', 'enable'], { check: false }).catch(() => '');
 
     for (let i = 0; i < attempts; i += 1) {
@@ -565,44 +597,12 @@ class EmulatorService {
       // eslint-disable-next-line no-await-in-loop
       const iface = await probe();
       if (iface) {
-        logger.warn(
-          { serial, iface },
-          'Wi-Fi restored to give the device a network; traffic on this interface may bypass the emulator proxy',
-        );
+        logger.warn({ serial, iface }, 'Wi-Fi restored; traffic on this interface bypasses the emulator proxy');
         return { online: true, via: iface, wifiRestored: true };
       }
     }
 
     return { online: false, via: null, wifiRestored: true, reason: 'no default route on either radio' };
-  }
-
-  /**
-   * Set the device timezone, verifying it actually took.
-   *
-   * `setprop persist.sys.timezone` silently does nothing as the shell user —
-   * the property is owned by the system — so the plain call is tried first and
-   * then escalated through `su` on userdebug images. The result is read back
-   * rather than assumed, because the failure is otherwise invisible.
-   */
-  async setTimezone(serial, timezone) {
-    const attempts = [
-      ['setprop', 'persist.sys.timezone', timezone],
-      ['su', '0', 'setprop', 'persist.sys.timezone', timezone],
-    ];
-
-    for (const parts of attempts) {
-      // eslint-disable-next-line no-await-in-loop
-      await shell(serial, parts, { check: false }).catch(() => '');
-      // eslint-disable-next-line no-await-in-loop
-      const actual = await getProp(serial, 'persist.sys.timezone');
-      if (actual === timezone) return { ok: true, timezone };
-    }
-
-    const actual = await getProp(serial, 'persist.sys.timezone');
-    return {
-      ok: false,
-      reason: `still ${actual || 'unset'} (needs a rooted or userdebug image)`,
-    };
   }
 
   /** Grant a permission, ignoring "not a changeable permission" noise. */

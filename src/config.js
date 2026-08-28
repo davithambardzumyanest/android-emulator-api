@@ -125,8 +125,8 @@ const config = {
     gpsOnly: bool(process.env.DEVICE_GPS_ONLY, true),
     // Wi-Fi off keeps the guest's traffic on the emulated mobile link, which is
     // the path `-http-proxy` actually proxies. emulatorService.ensureConnectivity
-    // puts it back if that leaves the device with no default route — a device
-    // with no network cannot load a map, however clean its location is.
+    // verifies the device still has a default route and reports when it does
+    // not; it does not restore Wi-Fi on its own, because that bypasses the proxy.
     wifi: bool(process.env.DEVICE_WIFI, false),
   },
 

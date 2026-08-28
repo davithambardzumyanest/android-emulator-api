@@ -47,6 +47,11 @@ function resolve(overrides = {}) {
     // Wi-Fi on also feeds the network location provider.
     wifi: bool(o.wifi, config.device.wifi),
     mobileData: bool(o.mobileData, true),
+    // Turn Wi-Fi back on if the device ends up with no default route at all.
+    // Off by default: the emulated Wi-Fi does not go through `-http-proxy`, so
+    // restoring it trades a proxy leak for connectivity. Opt in only where the
+    // exit IP does not matter.
+    restoreWifiIfOffline: bool(o.restoreWifiIfOffline, false),
     locationMode: num(o.locationMode, 3, { min: 0, max: 3 }),
 
     // Packages to grant location permission to. Maps is included by default
@@ -62,7 +67,7 @@ function resolve(overrides = {}) {
 const FIELDS = [
   'locale', 'timezone', 'batteryLevel', 'batteryCharging', 'disableAnimations',
   'screenOffTimeoutMs', 'gpsOnly', 'wifi', 'mobileData', 'locationMode',
-  'grantLocationTo',
+  'restoreWifiIfOffline', 'grantLocationTo',
 ];
 
 module.exports = { resolve, FIELDS };

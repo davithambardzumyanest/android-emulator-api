@@ -274,14 +274,24 @@ behaviour.
 
 **Careful with the radios.** `wifi` defaults to **off** so the guest's traffic
 goes out over the emulated mobile link, which is the path `-http-proxy` actually
-proxies. That is one `svc` call away from a device with no network at all —
-whether the emulated modem brings a data connection up depends on the system
-image — and a navigation app with no network shows a blank grid and never
-routes, which looks exactly like a broken emulator. After configuring the radios
-the device is checked for a default route; if there is none, Wi-Fi is turned
-back on and both the log and `settings.network` in the register response say so
-(`wifiRestored: true` means traffic on that interface may bypass the emulator
-proxy). Set `"wifi": true` if you would rather not have Wi-Fi toggled at all.
+proxies. On a healthy emulator the modem still brings up a default route and the
+device is fine — but a navigation app on a device with no network shows a blank
+grid and never routes, which looks exactly like a broken emulator. After
+configuring the radios the device is checked and the result reported in
+`settings.network` on the register response.
+
+Wi-Fi is **not** turned back on automatically when the check fails: the emulated
+Wi-Fi does not go through `-http-proxy`, so restoring it would route traffic out
+of the host's own IP. For proxy-dependent automation that is worse than a device
+with no network, so the failure is logged loudly and left alone. Pass
+`"restoreWifiIfOffline": true` to opt into the trade.
+
+Checking this correctly is fiddlier than it looks. Android uses **policy
+routing** — per-network routes live in numbered tables (1015 for the emulated
+modem), so plain `ip route` shows only a link-scope subnet line and a perfectly
+healthy device looks offline. The check uses `ip route show table all`, and
+ignores the `dummy0` default route that Android carries on every device as a
+blackhole for the no-network case.
 
 **Racing the fix.** Injecting a location is asynchronous. A navigation intent
 sent immediately afterwards is planned from the previous position. Use
