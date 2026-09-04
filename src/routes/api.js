@@ -12,6 +12,13 @@ router.get('/', (_req, res) => {
 router.post('/cleanup', async (_req, res) => {
   try {
     const summary = await deviceService.cleanupAll();
+
+    // Restarting kills this process, so only do it once the client actually
+    // has the response in hand - otherwise every cleanup looks like a failure.
+    if (summary.pm2RestartPending) {
+      res.on('finish', () => setTimeout(() => deviceService.restartViaPm2(), 250));
+    }
+
     res.json({ success: true, summary });
   } catch (e) {
     res.status(e.status || 500).json({ success: false, error: e.message || 'cleanup failed' });

@@ -755,20 +755,27 @@ const deviceService = {
             summary.deepClean.errors = [String(e?.message || e)];
         }
 
-        // Optionally restart this API via PM2 if service name is provided
-        const pm2Service = process.env.PM2_APP_NAME;
-        if (pm2Service && pm2Service.trim().length > 0) {
-            try {
-                summary.pm2Restart = await (async () => {
-                    // reuse trySpawn in this scope
-                    return await trySpawn('pm2', ['restart', pm2Service]);
-                })();
-            } catch (e) {
-                summary.pm2Restart = { command: `pm2 restart ${pm2Service}`, code: -1, stderr: String(e?.message || e) };
-            }
-        }
+        // The PM2 restart is deliberately NOT done here: it kills this process,
+        // so doing it inline means the caller never receives the summary above.
+        // The route restarts once the response has been flushed instead.
+        summary.pm2RestartPending = Boolean(process.env.PM2_APP_NAME && process.env.PM2_APP_NAME.trim());
 
         return summary;
+    },
+
+    /**
+     * Restart this API via PM2, if a service name is configured.
+     * Call this only after the HTTP response has been flushed - it kills us.
+     */
+    restartViaPm2() {
+        const pm2Service = String(process.env.PM2_APP_NAME || '').trim();
+        if (!pm2Service) return false;
+
+        logger.info(`Restarting PM2 service: ${pm2Service}`);
+        const proc = spawn('pm2', ['restart', pm2Service], {stdio: 'ignore', detached: true});
+        proc.on('error', (e) => logger.error(`pm2 restart failed: ${e.message}`));
+        proc.unref();
+        return true;
     },
 
     /**
