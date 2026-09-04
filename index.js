@@ -6,7 +6,6 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const logger = require('./src/logger');
 const apiRouter = require('./src/routes/api');
-const deviceService = require('./src/services/deviceService');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -41,16 +40,8 @@ app.use((err, _req, res, _next) => {
 });
 
 // Start server
-app.listen(PORT, async () => {
+app.listen(PORT, () => {
   logger.info(`Unified Mobile Emulator API running on http://localhost:${PORT}`);
-
-  // The registry is in-memory, so a restart leaves any running emulator
-  // orphaned - holding RAM that nothing tracks or can shut down.
-  try {
-    await deviceService.adoptOrphanEmulators();
-  } catch (e) {
-    logger.warn(`orphan adoption failed: ${e.message}`);
-  }
 });
 
 app.use((err, req, res, next) => {

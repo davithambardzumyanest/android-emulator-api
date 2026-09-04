@@ -1,8 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const deviceService = require('../services/deviceService');
+const emulatorService = require('../services/emulatorService');
 const actionService = require('../services/actionService');
-const cfg = require('../config/emulatorConfig');
 
 router.get('/', (_req, res) => {
   res.json({ name: 'Unified Mobile Emulator API', status: 'ok' });
@@ -11,15 +11,8 @@ router.get('/', (_req, res) => {
 // Cleanup: stop all emulators and kill lingering processes
 router.post('/cleanup', async (_req, res) => {
   try {
-    const summary = await deviceService.cleanupAll();
-
-    // Restarting kills this process, so only do it once the client actually
-    // has the response in hand - otherwise every cleanup looks like a failure.
-    if (summary.pm2RestartPending) {
-      res.on('finish', () => setTimeout(() => deviceService.restartViaPm2(), 250));
-    }
-
-    res.json({ success: true, summary });
+    await emulatorService.cleanupAll();
+    res.json({ success: true});
   } catch (e) {
     res.status(e.status || 500).json({ success: false, error: e.message || 'cleanup failed' });
   }
@@ -242,9 +235,7 @@ router.get('/devices/:id/stream', async (req, res) => {
   });
 
   let running = true;
-  // Each frame is a full guest-side PNG encode; a floor below this just queues
-  // captures faster than the device can produce them.
-  const intervalMs = Math.max(cfg.minStreamIntervalMs, Math.min(5000, Number(req.query.intervalMs) || cfg.minStreamIntervalMs));
+  const intervalMs = Math.max(200, Math.min(2000, Number(req.query.intervalMs) || 500));
 
   req.on('close', () => { running = false; });
 
