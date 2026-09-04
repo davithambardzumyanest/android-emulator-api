@@ -133,37 +133,41 @@ const ActionEngine = {
 
     console.log(`[${serial}] [${retryCount + 1}/${MAX_RETRIES}] taking screenshot...`);
 
-    // First, ensure the emulator is responsive
-    try {
-      // Check if device is online
-      const {stdout: devices} = await execAsync('adb devices');
-      if (!devices.includes(serial)) {
-        throw new Error('Device not found in adb devices');
-      }
+    // The health check below (adb devices + getprop + a uiautomator dump) costs
+    // more than the screenshot itself, and /stream runs this several times a
+    // second. Only pay for it once the fast path has actually failed.
+    if (retryCount > 0) {
+      try {
+        // Check if device is online
+        const {stdout: devices} = await execAsync('adb devices');
+        if (!devices.includes(serial)) {
+          throw new Error('Device not found in adb devices');
+        }
 
-      // Check if device is booted
-      const {stdout: bootStatus} = await execAsync(`adb -s ${serial} shell getprop sys.boot_completed`);
-      if (bootStatus.trim() !== '1') {
-        throw new Error('Device not fully booted');
-      }
+        // Check if device is booted
+        const {stdout: bootStatus} = await execAsync(`adb -s ${serial} shell getprop sys.boot_completed`);
+        if (bootStatus.trim() !== '1') {
+          throw new Error('Device not fully booted');
+        }
 
-      // Handle any system dialogs
-      const dialogHandled = await handleSystemDialogs(serial);
-      if (dialogHandled) {
-        console.log(`[${serial}] Handled system dialog, retrying screenshot...`);
-        // Small delay to let the dialog close
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
+        // Handle any system dialogs
+        const dialogHandled = await handleSystemDialogs(serial);
+        if (dialogHandled) {
+          console.log(`[${serial}] Handled system dialog, retrying screenshot...`);
+          // Small delay to let the dialog close
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
 
-    } catch (e) {
-      console.error(`[${serial}] Device check failed:`, e.message);
-      if (retryCount < MAX_RETRIES - 1) {
-        const delay = 2000 * (retryCount + 1); // Exponential backoff
-        console.log(`[${serial}] Retrying in ${delay}ms...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-        return this.screenshotStream(deviceId, retryCount + 1);
+      } catch (e) {
+        console.error(`[${serial}] Device check failed:`, e.message);
+        if (retryCount < MAX_RETRIES - 1) {
+          const delay = 2000 * (retryCount + 1); // Exponential backoff
+          console.log(`[${serial}] Retrying in ${delay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          return this.screenshotStream(deviceId, retryCount + 1);
+        }
+        throw new Error(`Device not responding: ${e.message}`);
       }
-      throw new Error(`Device not responding: ${e.message}`);
     }
 
     try {

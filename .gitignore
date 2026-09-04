@@ -183,3 +183,7 @@ yarn-error.log*
 *.njsproj
 *.sln
 *.sw?
+
+# Runtime state (wipe-once flag, device registry)
+.state/
+
