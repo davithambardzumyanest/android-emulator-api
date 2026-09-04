@@ -443,6 +443,54 @@ const deviceService = {
         return applied;
     },
 
+    /**
+     * Register any running emulator the registry does not know about.
+     *
+     * The registry lives in memory, so every restart loses it while the
+     * emulators keep running - they then hold RAM that nothing can see, count
+     * against, or shut down. Adopting them puts them back under control.
+     */
+    async adoptOrphanEmulators() {
+        const known = new Set(
+            deviceManager.list()
+                .map((d) => d?.meta?.deviceId)
+                .filter(Boolean)
+        );
+
+        let serials = [];
+        try {
+            const {stdout} = await execAdbRaw(['devices']);
+            serials = stdout.split(/\r?\n/)
+                .map((l) => l.trim())
+                .filter((l) => /^emulator-\d+\s+device$/.test(l))
+                .map((l) => l.split(/\s+/)[0]);
+        } catch (e) {
+            logger.warn(`could not enumerate adb devices to adopt orphans: ${e.message}`);
+            return [];
+        }
+
+        const adopted = [];
+        for (const serial of serials) {
+            if (known.has(serial)) continue;
+            const port = Number(serial.split('-')[1]);
+            const device = deviceManager.register({
+                platform: 'android',
+                proxy: null,
+                meta: {
+                    deviceId: serial,
+                    adopted: true,
+                    emulator: {name: serial, port, pid: null, command: null}
+                }
+            });
+            adopted.push({id: device.id, serial});
+        }
+
+        if (adopted.length > 0) {
+            logger.info(`adopted ${adopted.length} orphaned emulator(s): ${adopted.map((a) => a.serial).join(', ')}`);
+        }
+        return adopted;
+    },
+
     list() {
         return deviceManager.list();
     },
@@ -689,9 +737,15 @@ const deviceService = {
         // // Kill adb server to release any lingering connections/ports
         // summary.adbKill = await trySpawn('adb', ['kill-server']);
 
-        // Ensure next emulator start is a fresh device (one-time wipe)
-        setWipeOnceFlag();
-        summary.wipeNextStart = true;
+        // Ensure next emulator start is a fresh device. Under -read-only every
+        // boot already gets a throwaway data overlay, so forcing -wipe-data on
+        // top of it only buys a redundant first boot.
+        if (cfg.readOnly) {
+            summary.wipeNextStart = false;
+        } else {
+            setWipeOnceFlag();
+            summary.wipeNextStart = true;
+        }
 
         // Deep clean: remove caches/locks/logs/snapshots and temp emulator files
         try {
