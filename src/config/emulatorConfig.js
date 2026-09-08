@@ -103,6 +103,13 @@ const emulatorConfig = {
         return envBool('ADB_AUTO_DISMISS_DIALOGS', false);
     },
 
+    // /cleanup tears down every running device. The endpoint is unauthenticated
+    // and a caller polling it on a timer is indistinguishable from an operator
+    // running it once, so the destructive sweep is opt-in rather than default.
+    get cleanupRequiresForce() {
+        return envBool('CLEANUP_REQUIRE_FORCE', true);
+    },
+
     get tuneAfterBoot() {
         return envBool('EMULATOR_TUNE_AFTER_BOOT', true);
     },

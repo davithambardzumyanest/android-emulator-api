@@ -3,15 +3,35 @@ const router = express.Router();
 const deviceService = require('../services/deviceService');
 const actionService = require('../services/actionService');
 const cfg = require('../config/emulatorConfig');
+const logger = require('../logger');
+
+// Accept the force flag from the query string or a JSON body, so an operator
+// can trigger a real cleanup with a bare curl either way.
+function isForced(req) {
+  const raw = req.query?.force ?? req.body?.force;
+  const v = String(raw ?? '').trim().toLowerCase();
+  return v === 'true' || v === '1' || v === 'yes' || v === 'on';
+}
 
 router.get('/', (_req, res) => {
   res.json({ name: 'Unified Mobile Emulator API', status: 'ok' });
 });
 
 // Cleanup: stop all emulators and kill lingering processes
-router.post('/cleanup', async (_req, res) => {
+router.post('/cleanup', async (req, res) => {
   try {
-    const summary = await deviceService.cleanupAll();
+    const force = isForced(req);
+
+    // The caller is worth recording: this endpoint is publicly reachable and
+    // whatever polls it has never been identified.
+    logger.info({
+      msg: 'cleanup requested',
+      force,
+      ip: req.ip,
+      userAgent: req.get('user-agent') || null,
+    });
+
+    const summary = await deviceService.cleanupAll({ force });
 
     // Restarting kills this process, so only do it once the client actually
     // has the response in hand - otherwise every cleanup looks like a failure.

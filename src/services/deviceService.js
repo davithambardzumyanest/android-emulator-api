@@ -25,6 +25,21 @@ function execAdbRaw(args) {
     });
 }
 
+// Serials adb currently reports as booted. The guarded cleanup path uses this
+// to report what a forced run would tear down, without touching anything.
+async function listRunningEmulatorSerials() {
+    try {
+        const {stdout} = await execAdbRaw(['devices']);
+        return String(stdout)
+            .split(/\r?\n/)
+            .map((l) => l.trim())
+            .filter((l) => /^emulator-\d+\s+device$/.test(l))
+            .map((l) => l.split(/\s+/)[0]);
+    } catch {
+        return [];
+    }
+}
+
 // Read the sizing an AVD asks for, so we can clamp it rather than blindly
 // overriding it. Values look like "1536M", "8192M" or a bare number of MB.
 function readAvdSizing(avdName) {
@@ -661,7 +676,7 @@ const deviceService = {
      * 2) Best-effort kill any leftover emulator/qemu processes
      * 3) Kill adb server to release ports
      */
-    async cleanupAll() {
+    async cleanupAll({force = false} = {}) {
         const summary = {
             stopResults: [],
             adbEnumeratedKills: [],
@@ -670,6 +685,20 @@ const deviceService = {
             wipeNextStart: false,
             deepClean: { avdPaths: [], tmpPaths: [], errors: [] }
         };
+
+        // This kills every running device, and a cold boot needs ~90s. Something
+        // polls this endpoint about once a minute, which is long enough to tear a
+        // device down and far too short to let one come up - so without an
+        // explicit force we report what a real run would kill and change nothing.
+        if (cfg.cleanupRequiresForce && !force) {
+            summary.skipped = true;
+            summary.reason = 'cleanup is guarded: pass force=true to tear down devices, or set CLEANUP_REQUIRE_FORCE=false to remove the guard';
+            summary.runningEmulators = await listRunningEmulatorSerials();
+            summary.pm2RestartPending = false;
+            logger.warn(`cleanup skipped (guarded); ${summary.runningEmulators.length} emulator(s) left running`);
+            return summary;
+        }
+
         try {
             const stopped = await this.stopAllEmulators();
             summary.stopResults = stopped.results || [];
