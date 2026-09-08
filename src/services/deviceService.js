@@ -63,6 +63,10 @@ function readAvdSizing(avdName) {
 const wipeFlagPath = path.join(__dirname, '../../.state');
 const wipeFlagFile = path.join(wipeFlagPath, 'wipe-once.flag');
 
+// Emulators run detached, so their output goes to a file per device rather
+// than through a pipe that dies with the API process.
+const emulatorLogDir = path.join(wipeFlagPath, 'emulator-logs');
+
 // Normalize proxy string for emulator flag (-http-proxy) which is more reliable with host:port
 function normalizeProxyForEmulator(p) {
     if (!p) return null;
@@ -384,11 +388,24 @@ const deviceService = {
 
         logger.info(`[Emulator ${avdName}] emulator ${args.join(' ')}`);
 
-        // stdout/stderr are piped rather than inherited: the emulator is chatty
-        // and inheriting dumps every line into the pm2 log for the life of the
-        // device. They still have to be drained or the child blocks on a full pipe.
+        // The device has to outlive us. pm2 signals the whole process group on a
+        // restart, so a child in our group dies with the API - which is why a
+        // deploy used to wipe every running device and why adoptOrphanEmulators()
+        // never found anything to adopt. detached puts the emulator in its own
+        // process group instead.
+        //
+        // That rules out piped stdio: once we exit, the read end of the pipe
+        // closes and the emulator is chatty enough to hit SIGPIPE on its next
+        // write. A per-device log file survives our exit and still keeps the
+        // emulator's output out of the pm2 log, which is what piping was for.
+        fs.mkdirSync(emulatorLogDir, {recursive: true});
+        const logPath = path.join(emulatorLogDir, `${avdName}-${port}.log`);
+        const logFd = fs.openSync(logPath, 'a');
+        logger.info(`[Emulator ${avdName}] output -> ${logPath}`);
+
         const emulatorProcess = spawn('emulator', args, {
-            stdio: ['ignore', 'pipe', 'pipe'],
+            stdio: ['ignore', logFd, logFd],
+            detached: true,
             shell: false,
             env: {
                 ...process.env,                         // keep existing env
@@ -401,8 +418,11 @@ const deviceService = {
             }
         });
 
-        emulatorProcess.stdout.on('data', (d) => logger.debug(`[Emulator ${avdName}] ${String(d).trim()}`));
-        emulatorProcess.stderr.on('data', (d) => logger.debug(`[Emulator ${avdName}] ${String(d).trim()}`));
+        // The child dup'd the fd; ours would otherwise leak one per device.
+        fs.closeSync(logFd);
+
+        // Don't hold the event loop open for a process we intend to outlive us.
+        emulatorProcess.unref();
 
         // Log process exit
         emulatorProcess.on('close', (code) => {
