@@ -25,6 +25,19 @@ function execAdbRaw(args) {
     });
 }
 
+// Does this pid still exist? Signal 0 performs the permission and existence
+// checks without actually sending anything. EPERM means it is alive but owned
+// by someone else, which still counts as running.
+function isPidAlive(pid) {
+    if (!pid) return false;
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (e) {
+        return e.code === 'EPERM';
+    }
+}
+
 // Serials adb currently reports as booted. The guarded cleanup path uses this
 // to report what a forced run would tear down, without touching anything.
 async function listRunningEmulatorSerials() {
@@ -176,10 +189,54 @@ const deviceService = {
     },
 
     /**
+     * Drop registry entries whose emulator is gone. Devices die on their own -
+     * a crash, an external kill, an OOM - and nothing ever told the registry,
+     * so a dead entry held its slot in assertCapacity() forever. The API then
+     * refuses new devices with "Device limit reached (6/6)" while counting
+     * emulators that no longer exist, and hands out "ready" devices whose adb
+     * serial is unreachable.
+     *
+     * A booting device has a live pid but is not in `adb devices` yet, so the
+     * pid is the authority whenever we have one; adb is only consulted for
+     * adopted devices, where the pid was never known.
+     */
+    async reconcileDevices() {
+        let liveSerials = null;
+        const removed = [];
+
+        for (const d of deviceManager.list()) {
+            if (d.platform !== 'android') continue;
+
+            const serial = d?.meta?.deviceId;
+            const pid = d?.meta?.emulator?.pid;
+
+            let alive;
+            if (pid) {
+                alive = isPidAlive(pid);
+            } else {
+                if (liveSerials === null) liveSerials = new Set(await listRunningEmulatorSerials());
+                alive = Boolean(serial && liveSerials.has(serial));
+            }
+            if (alive) continue;
+
+            deviceManager.remove(d.id);
+            removed.push(serial || d.id);
+        }
+
+        if (removed.length > 0) {
+            logger.info(`reaped ${removed.length} dead device(s) from the registry: ${removed.join(', ')}`);
+        }
+        return removed;
+    },
+
+    /**
      * Refuse to start a device we cannot afford. Overshooting RAM pushes the
      * whole host into swap, which costs far more than the extra device gains.
      */
     async assertCapacity() {
+        // Count against reality, not against entries nothing ever cleaned up.
+        await this.reconcileDevices();
+
         const registered = deviceManager.list().filter((d) => d.platform === 'android').length;
         let live = 0;
         try {

@@ -43,6 +43,10 @@ class DeviceManager {
     return d;
   }
 
+  remove(id) {
+    return this.devices.delete(id);
+  }
+
   clear() {
     this.devices.clear();
   }

@@ -85,7 +85,14 @@ router.post('/devices/register', async (req, res) => {
   }
 });
 
-router.get('/devices', (_req, res) => {
+router.get('/devices', async (_req, res) => {
+  // Reap first, so a caller is never handed a "ready" device whose emulator
+  // died - driving one of those fails with "device 'emulator-NNNN' not found".
+  try {
+    await deviceService.reconcileDevices();
+  } catch (e) {
+    logger.warn(`device reconcile failed: ${e.message}`);
+  }
   res.json({ devices: deviceService.list() });
 });
 
