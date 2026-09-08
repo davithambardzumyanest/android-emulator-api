@@ -7,6 +7,7 @@ const rateLimit = require('express-rate-limit');
 const logger = require('./src/logger');
 const apiRouter = require('./src/routes/api');
 const deviceService = require('./src/services/deviceService');
+const cfg = require('./src/config/emulatorConfig');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -50,6 +51,15 @@ app.listen(PORT, async () => {
     await deviceService.adoptOrphanEmulators();
   } catch (e) {
     logger.warn(`orphan adoption failed: ${e.message}`);
+  }
+
+  // Nothing releases a device on its own, so retire the old ones on a timer.
+  const sweepMs = cfg.deviceSweepIntervalMs;
+  if (cfg.deviceMaxAgeMs > 0) {
+    logger.info(`device expiry: retiring devices older than ${Math.round(cfg.deviceMaxAgeMs / 60000)}m, checked every ${Math.round(sweepMs / 1000)}s`);
+    setInterval(() => {
+      deviceService.expireOldDevices().catch((e) => logger.warn(`device expiry sweep failed: ${e.message}`));
+    }, sweepMs);
   }
 });
 

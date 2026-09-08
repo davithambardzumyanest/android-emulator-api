@@ -219,6 +219,7 @@ const deviceService = {
             }
             if (alive) continue;
 
+            this.stopDeviceTasks(d);
             deviceManager.remove(d.id);
             removed.push(serial || d.id);
         }
@@ -227,6 +228,40 @@ const deviceService = {
             logger.info(`reaped ${removed.length} dead device(s) from the registry: ${removed.join(', ')}`);
         }
         return removed;
+    },
+
+    /**
+     * Retire devices older than cfg.deviceMaxAgeMs. Age is measured from
+     * registration, not last use: the point is to bound how long a device may
+     * hold a slot, and nothing in the API tracks activity per device.
+     */
+    async expireOldDevices() {
+        const maxAgeMs = cfg.deviceMaxAgeMs;
+        if (maxAgeMs <= 0) return [];
+
+        const now = Date.now();
+        const expired = [];
+
+        for (const d of deviceManager.list()) {
+            if (d.platform !== 'android') continue;
+
+            const created = Date.parse(d.createdAt);
+            if (!Number.isFinite(created) || now - created < maxAgeMs) continue;
+
+            const label = `${d?.meta?.deviceId || d.id} (${Math.round((now - created) / 60000)}m old)`;
+            try {
+                await this.stopDevice(d);
+            } catch (e) {
+                logger.warn(`expiring ${label}: stop failed: ${e.message}`);
+            }
+            deviceManager.remove(d.id);
+            expired.push(label);
+        }
+
+        if (expired.length > 0) {
+            logger.info(`expired ${expired.length} device(s) past ${Math.round(maxAgeMs / 60000)}m: ${expired.join(', ')}`);
+        }
+        return expired;
     },
 
     /**
@@ -686,57 +721,90 @@ const deviceService = {
      * Stop all emulators and clear device registry.
      * For each Android device: try to disable animations, then stop emulator.
      */
+    /**
+     * Cancel anything scheduled against a device. A GPS route is a setInterval
+     * parked on device.tasks.route, and nothing ever cancelled those: a cleanup
+     * dropped the registry but left the timers running, so they kept driving
+     * adb at a serial that no longer existed and kept the device object alive.
+     * A route started with loop:true never stopped on its own at all.
+     */
+    stopDeviceTasks(device) {
+        const groups = device?.tasks;
+        if (!groups || typeof groups !== 'object') return 0;
+
+        let cleared = 0;
+        for (const groupName of Object.keys(groups)) {
+            const group = groups[groupName];
+            if (!group || typeof group !== 'object') continue;
+
+            for (const taskId of Object.keys(group)) {
+                clearInterval(group[taskId]);
+                delete group[taskId];
+                cleared += 1;
+            }
+        }
+        return cleared;
+    },
+
+    /**
+     * Stop one device: cancel its tasks, ask the emulator to shut down, then
+     * kill the process if it ignored that. Leaves the registry alone - callers
+     * decide whether the entry should go.
+     */
+    async stopDevice(d) {
+        const serial = d?.meta?.deviceId || (d?.meta?.emulator?.port ? `emulator-${d.meta.emulator.port}` : null);
+        const pid = d?.meta?.emulator?.pid;
+        const entry = {deviceId: d.id, serial, pid, stopped: false, tasksCleared: 0, errors: []};
+
+        entry.tasksCleared = this.stopDeviceTasks(d);
+
+        // Best-effort: disable animations before shutdown (may fail if not booted)
+        if (serial) {
+            try {
+                await this.executeAdb(d.id, ['shell', 'settings', 'put', 'global', 'window_animation_scale', '0']);
+            } catch (e) {
+                entry.errors.push(`disable window_animation_scale: ${e.message}`);
+            }
+            try {
+                await this.executeAdb(d.id, ['shell', 'settings', 'put', 'global', 'transition_animation_scale', '0']);
+            } catch (e) {
+                entry.errors.push(`disable transition_animation_scale: ${e.message}`);
+            }
+            try {
+                await this.executeAdb(d.id, ['shell', 'settings', 'put', 'global', 'animator_duration_scale', '0']);
+            } catch (e) {
+                entry.errors.push(`disable animator_duration_scale: ${e.message}`);
+            }
+        }
+
+        // Try graceful shutdown first
+        if (serial) {
+            try {
+                await this.executeAdb(d.id, ['emu', 'kill']);
+                entry.stopped = true;
+            } catch (e) {
+                entry.errors.push(`adb emu kill: ${e.message}`);
+            }
+        }
+
+        // Fallback: kill by PID
+        if (!entry.stopped && typeof pid === 'number') {
+            try {
+                process.kill(pid, 'SIGKILL');
+                entry.stopped = true;
+            } catch (e) {
+                entry.errors.push(`kill ${pid}: ${e.message}`);
+            }
+        }
+
+        return entry;
+    },
+
     async stopAllEmulators() {
-        const devices = this.list();
         const results = [];
-
-        for (const d of devices) {
+        for (const d of this.list()) {
             if (d.platform !== 'android') continue;
-
-            const serial = d?.meta?.deviceId || (d?.meta?.emulator?.port ? `emulator-${d.meta.emulator.port}` : null);
-            const pid = d?.meta?.emulator?.pid;
-            const entry = {deviceId: d.id, serial, pid, stopped: false, errors: []};
-
-            // Best-effort: disable animations before shutdown (may fail if not booted)
-            if (serial) {
-                try {
-                    await this.executeAdb(d.id, ['shell', 'settings', 'put', 'global', 'window_animation_scale', '0']);
-                } catch (e) {
-                    entry.errors.push(`disable window_animation_scale: ${e.message}`);
-                }
-                try {
-                    await this.executeAdb(d.id, ['shell', 'settings', 'put', 'global', 'transition_animation_scale', '0']);
-                } catch (e) {
-                    entry.errors.push(`disable transition_animation_scale: ${e.message}`);
-                }
-                try {
-                    await this.executeAdb(d.id, ['shell', 'settings', 'put', 'global', 'animator_duration_scale', '0']);
-                } catch (e) {
-                    entry.errors.push(`disable animator_duration_scale: ${e.message}`);
-                }
-            }
-
-            // Try graceful shutdown first
-            if (serial) {
-                try {
-                    await this.executeAdb(d.id, ['emu', 'kill']);
-                    entry.stopped = true;
-                } catch (e) {
-                    entry.errors.push(`adb emu kill: ${e.message}`);
-                }
-            }
-
-            // Fallback: kill by PID
-            if (!entry.stopped && typeof pid === 'number') {
-                try {
-                    process.kill(pid, 'SIGKILL');
-                    entry.stopped = true;
-                } catch (e) {
-                    entry.errors.push(`kill ${pid}: ${e.message}`);
-                }
-            }
-
-            results.push(entry);
+            results.push(await this.stopDevice(d));
         }
 
         // Clear device registry

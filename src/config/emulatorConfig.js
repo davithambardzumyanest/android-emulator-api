@@ -103,6 +103,22 @@ const emulatorConfig = {
         return envBool('ADB_AUTO_DISMISS_DIALOGS', false);
     },
 
+    // How long a device may live before it is retired. Nothing else releases
+    // one - there is no per-device stop endpoint, so a slot was only ever freed
+    // by an emulator dying - which means without this the registry fills to
+    // maxDevices and every later register fails with "Device limit reached".
+    // Set DEVICE_MAX_AGE_MS=0 to switch expiry off.
+    get deviceMaxAgeMs() {
+        const raw = String(process.env.DEVICE_MAX_AGE_MS ?? '').trim();
+        if (raw === '0') return 0;
+        return envInt('DEVICE_MAX_AGE_MS', 60 * 60 * 1000);
+    },
+
+    // How often the expiry sweep runs.
+    get deviceSweepIntervalMs() {
+        return envInt('DEVICE_SWEEP_INTERVAL_MS', 60 * 1000);
+    },
+
     // /cleanup tears down every running device. The endpoint is unauthenticated
     // and a caller polling it on a timer is indistinguishable from an operator
     // running it once, so the destructive sweep is opt-in rather than default.
