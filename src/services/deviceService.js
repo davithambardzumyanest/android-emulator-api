@@ -62,6 +62,45 @@ async function listRunningEmulatorSerials() {
     }
 }
 
+// Everything the emulator stack runs, matched on the SDK paths it actually
+// lives in. crashpad_handler is the one that accumulates: each emulator spawns
+// two, they reparent to init, and no pkill pattern here ever covered them.
+const EMULATOR_PROC_RE = /qemu-system-|\/android-sdk\/emulator\/|crashpad_handler|emulator64-crash-service|emulator-headless|adb\s+-s\s+emulator-/;
+
+// This directory. The exclusion below matters far more than the match above:
+// cleanup used to `pkill -f android-emulator`, which matched the API's own path
+// and SIGKILLed the process mid-cleanup. Never match ourselves again.
+const appDir = path.resolve(__dirname, '..', '..');
+
+// Emulator-family processes still alive, with their CPU cost.
+async function listEmulatorProcesses() {
+    return new Promise((resolve) => {
+        const proc = spawn('ps', ['-eo', 'pid=,pcpu=,args='], {stdio: ['ignore', 'pipe', 'ignore']});
+        let out = '';
+        proc.stdout.on('data', (d) => { out += d.toString(); });
+        proc.on('error', () => resolve([]));
+        proc.on('close', () => {
+            const rows = [];
+            for (const line of out.split(/\r?\n/)) {
+                const m = line.trim().match(/^(\d+)\s+(\S+)\s+(.*)$/);
+                if (!m) continue;
+
+                const pid = Number(m[1]);
+                const args = m[3];
+
+                // Never us, never our parent (pm2), never anything running out
+                // of this app's directory.
+                if (pid === process.pid || pid === process.ppid) continue;
+                if (args.includes(appDir)) continue;
+                if (!EMULATOR_PROC_RE.test(args)) continue;
+
+                rows.push({pid, cpu: Number(m[2]) || 0, args: args.slice(0, 120)});
+            }
+            resolve(rows);
+        });
+    });
+}
+
 // Which AVDs are currently booted, read from the emulator processes rather
 // than the registry: an adopted device never recorded which AVD it came from.
 // Resolves to null if the process list cannot be read, meaning "unknown".
@@ -984,6 +1023,9 @@ const deviceService = {
             ['pkill', ['-f', 'qemu-system-']],
             ['pkill', ['-x', 'emulator']],
             ['pkill', ['-x', 'emulator-headless']],
+            // Each emulator leaves two of these behind, reparented to init.
+            ['pkill', ['-f', 'android-sdk/emulator/crashpad_handler']],
+            ['pkill', ['-f', 'emulator64-crash-service']],
         ];
         for (const [cmd, args] of killPatterns) {
             // eslint-disable-next-line no-await-in-loop
@@ -991,8 +1033,28 @@ const deviceService = {
             summary.processKills.push(res);
         }
 
-        // // Kill adb server to release any lingering connections/ports
-        // summary.adbKill = await trySpawn('adb', ['kill-server']);
+        // Whatever the patterns missed. A pkill only fires on the names it was
+        // told about; this looks at what is actually still running and burning
+        // CPU, and is the difference between "cleanup ran" and "the host is
+        // idle again".
+        summary.residualKills = [];
+        for (const p of await listEmulatorProcesses()) {
+            try {
+                process.kill(p.pid, 'SIGKILL');
+                summary.residualKills.push(p);
+            } catch (e) {
+                if (e.code !== 'ESRCH') summary.residualKills.push({...p, error: e.message});
+            }
+        }
+        if (summary.residualKills.length > 0) {
+            const cpu = summary.residualKills.reduce((n, p) => n + (p.cpu || 0), 0);
+            logger.info(`cleanup swept ${summary.residualKills.length} leftover process(es) holding ${cpu.toFixed(0)}% CPU`);
+        }
+
+        // The adb server outlives every emulator and holds the client
+        // connections; resetting it drops any that are stuck. It restarts on
+        // the next adb call.
+        summary.adbKill = await trySpawn('adb', ['kill-server']);
 
         // Ensure next emulator start is a fresh device. Under -read-only every
         // boot already gets a throwaway data overlay, so forcing -wipe-data on
