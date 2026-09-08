@@ -103,6 +103,14 @@ const emulatorConfig = {
         return envBool('ADB_AUTO_DISMISS_DIALOGS', false);
     },
 
+    // How long to watch a freshly spawned emulator before calling it started.
+    // It can die within a second - a busy AVD, a name that does not exist - and
+    // reporting a "ready" device for a dead process only resurfaces later as a
+    // confusing "Device not found" on the caller's next request.
+    get startupGraceMs() {
+        return envInt('EMULATOR_STARTUP_GRACE_MS', 4000);
+    },
+
     // How long a device may live before it is retired. Nothing else releases
     // one - there is no per-device stop endpoint, so a slot was only ever freed
     // by an emulator dying - which means without this the registry fills to

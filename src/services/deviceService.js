@@ -40,17 +40,47 @@ function isPidAlive(pid) {
 
 // Serials adb currently reports as booted. The guarded cleanup path uses this
 // to report what a forced run would tear down, without touching anything.
+// Serials adb reports, in ANY state. A device that is booting or busy shows as
+// "offline", not "device", and it is very much not dead - matching only
+// "device" would have the reaper delete a live emulator. Throws if adb cannot
+// be reached: "adb failed" must never be read as "nothing is running".
+async function listEmulatorSerials() {
+    const {stdout} = await execAdbRaw(['devices']);
+    return String(stdout)
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter((l) => /^emulator-\d+\s+\S/.test(l))
+        .map((l) => l.split(/\s+/)[0]);
+}
+
+// Same list, but for callers that only want a best-effort snapshot.
 async function listRunningEmulatorSerials() {
     try {
-        const {stdout} = await execAdbRaw(['devices']);
-        return String(stdout)
-            .split(/\r?\n/)
-            .map((l) => l.trim())
-            .filter((l) => /^emulator-\d+\s+device$/.test(l))
-            .map((l) => l.split(/\s+/)[0]);
+        return await listEmulatorSerials();
     } catch {
         return [];
     }
+}
+
+// Which AVDs are currently booted, read from the emulator processes rather
+// than the registry: an adopted device never recorded which AVD it came from.
+// Resolves to null if the process list cannot be read, meaning "unknown".
+async function listAvdsInUse() {
+    return new Promise((resolve) => {
+        const proc = spawn('ps', ['-eo', 'args='], {stdio: ['ignore', 'pipe', 'ignore']});
+        let out = '';
+        proc.stdout.on('data', (d) => { out += d.toString(); });
+        proc.on('error', () => resolve(null));
+        proc.on('close', () => {
+            const avds = new Set();
+            for (const line of out.split(/\r?\n/)) {
+                if (!/qemu-system|(^|\/)emulator\b/.test(line)) continue;
+                const m = line.match(/-avd\s+(\S+)/);
+                if (m) avds.add(m[1]);
+            }
+            resolve(avds);
+        });
+    });
 }
 
 // Read the sizing an AVD asks for, so we can clamp it rather than blindly
@@ -142,8 +172,23 @@ const deviceService = {
             //   '--force'
             // ]);
 
+            // One AVD, one emulator. Without -read-only a second instance of a
+            // running AVD exits immediately, so catch it here with an error that
+            // says so rather than letting it fail silently.
+            if (avd && !cfg.readOnly) {
+                const inUse = await listAvdsInUse();
+                if (inUse && inUse.has(avd)) {
+                    const e = new Error(`AVD '${avd}' is already in use by a running emulator. An AVD cannot be shared unless EMULATOR_READ_ONLY=true; pick a different AVD.`);
+                    e.status = 409;
+                    throw e;
+                }
+            }
+
             // Start the emulator
             const emulatorProcess = await this.startEmulator(avd, port, proxy);
+            await this.assertEmulatorStarted(emulatorProcess, avd);
+
+            meta.avd = avd || null;
 
             // Update meta with emulator details
             meta.emulator = {
@@ -214,7 +259,16 @@ const deviceService = {
             if (pid) {
                 alive = isPidAlive(pid);
             } else {
-                if (liveSerials === null) liveSerials = new Set(await listRunningEmulatorSerials());
+                if (liveSerials === null) {
+                    try {
+                        liveSerials = new Set(await listEmulatorSerials());
+                    } catch (e) {
+                        // Reaping on a failed enumeration would wipe every
+                        // adopted device at once. Leave the registry alone.
+                        logger.warn(`device reconcile: adb enumeration failed (${e.message}); skipping the sweep`);
+                        return removed;
+                    }
+                }
                 alive = Boolean(serial && liveSerials.has(serial));
             }
             if (alive) continue;
@@ -228,6 +282,32 @@ const deviceService = {
             logger.info(`reaped ${removed.length} dead device(s) from the registry: ${removed.join(', ')}`);
         }
         return removed;
+    },
+
+    /**
+     * Watch a freshly spawned emulator long enough to know it actually started.
+     * A second instance of an AVD already in use dies within a second with
+     * "Running multiple emulators with the same AVD", and registering that as a
+     * ready device just defers the failure to the caller's next request.
+     */
+    async assertEmulatorStarted(proc, avdName) {
+        const deadline = Date.now() + cfg.startupGraceMs;
+        while (Date.now() < deadline) {
+            if (!isPidAlive(proc.pid)) break;
+            await new Promise((r) => setTimeout(r, 200));
+        }
+        if (isPidAlive(proc.pid)) return;
+
+        let reason = '';
+        try {
+            const lines = fs.readFileSync(proc.logPath, 'utf8').split(/\r?\n/).filter(Boolean);
+            const fatal = lines.reverse().find((l) => /^(FATAL|ERROR)\s*\|/.test(l));
+            if (fatal) reason = fatal.replace(/^\w+\s*\|\s*/, '').trim();
+        } catch (_) { /* no log to explain it */ }
+
+        const e = new Error(`emulator for AVD '${avdName}' exited during startup${reason ? `: ${reason}` : ''}`);
+        e.status = 409;
+        throw e;
     },
 
     /**
@@ -515,6 +595,9 @@ const deviceService = {
 
         // Don't hold the event loop open for a process we intend to outlive us.
         emulatorProcess.unref();
+
+        // So a caller that finds it dead can quote the reason from its log.
+        emulatorProcess.logPath = logPath;
 
         // Log process exit
         emulatorProcess.on('close', (code) => {
