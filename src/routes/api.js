@@ -13,6 +13,15 @@ function isForced(req) {
   return v === 'true' || v === '1' || v === 'yes' || v === 'on';
 }
 
+// Any route below that names a device counts as using it. The idle sweep
+// retires devices on lastUsedAt, so this is what keeps a device that is being
+// actively driven from being reclaimed mid-campaign. Declared ahead of the
+// routes so it runs for all of them.
+router.param('id', (req, _res, next, id) => {
+  deviceService.touch(id);
+  next();
+});
+
 router.get('/', (_req, res) => {
   res.json({ name: 'Unified Mobile Emulator API', status: 'ok' });
 });
@@ -95,6 +104,23 @@ router.get('/devices', async (_req, res) => {
   }
   res.json({ devices: deviceService.list() });
 });
+
+// Hand a device back. Without this the only way to free a slot was POST
+// /cleanup, which tears down every device at once, so a client finishing one
+// task early could not release its device or its AVD. Exposed as both a DELETE
+// on the resource and a POST, so a caller that cannot easily issue DELETE
+// still has a way to do it.
+async function releaseDevice(req, res) {
+  try {
+    const result = await deviceService.release(req.params.id);
+    res.json({ success: true, ...result });
+  } catch (e) {
+    res.status(e.status || 500).json({ success: false, error: e.message || 'release failed' });
+  }
+}
+
+router.delete('/devices/:id', releaseDevice);
+router.post('/devices/:id/release', releaseDevice);
 
 router.post('/devices/:id/proxy', (req, res) => {
   try {
@@ -289,6 +315,9 @@ router.get('/devices/:id/stream', async (req, res) => {
   async function loop() {
     while (running) {
       try {
+        // A stream can outlive the idle window on its own; the param callback
+        // only fired once, when the request opened.
+        deviceService.touch(req.params.id);
         const png = await captureOnce();
         res.write(`--${boundary}\r\n`);
         res.write('Content-Type: image/png\r\n');

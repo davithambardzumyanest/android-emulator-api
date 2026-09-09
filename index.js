@@ -53,12 +53,16 @@ app.listen(PORT, async () => {
     logger.warn(`orphan adoption failed: ${e.message}`);
   }
 
-  // Nothing releases a device on its own, so retire the old ones on a timer.
+  // A client that releases its devices needs none of this; the sweep is the
+  // backstop for the ones it walks away from.
   const sweepMs = cfg.deviceSweepIntervalMs;
-  if (cfg.deviceMaxAgeMs > 0) {
-    logger.info(`device expiry: retiring devices older than ${Math.round(cfg.deviceMaxAgeMs / 60000)}m, checked every ${Math.round(sweepMs / 1000)}s`);
+  if (cfg.deviceMaxIdleMs > 0 || cfg.deviceMaxAgeMs > 0) {
+    const rules = [];
+    if (cfg.deviceMaxIdleMs > 0) rules.push(`unused for ${Math.round(cfg.deviceMaxIdleMs / 60000)}m`);
+    if (cfg.deviceMaxAgeMs > 0) rules.push(`older than ${Math.round(cfg.deviceMaxAgeMs / 60000)}m`);
+    logger.info(`device sweep: retiring devices ${rules.join(' or ')}, checked every ${Math.round(sweepMs / 1000)}s`);
     setInterval(() => {
-      deviceService.expireOldDevices().catch((e) => logger.warn(`device expiry sweep failed: ${e.message}`));
+      deviceService.expireOldDevices().catch((e) => logger.warn(`device sweep failed: ${e.message}`));
     }, sweepMs);
   }
 });

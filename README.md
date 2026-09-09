@@ -21,16 +21,18 @@ A lightweight HTTP API for orchestrating Android emulators and device actions fr
 
 ## Resource tuning
 
-Each emulator is the expensive thing here, not the API. The defaults aim at a
-headless server running several devices at once; every knob lives in `.env`
-(see `.env.example`) so a host can be tuned without a code change.
+Each emulator is the expensive thing here, not the API. The defaults are sized
+for the deployed host - 8 vCPU / 62 GB running about **two devices at a time** -
+and every knob lives in `.env` (see `.env.example`) so a host can be tuned
+without a code change.
 
 What the defaults do:
 
-- **RAM/cores follow the AVD, capped.** `EMULATOR_MAX_MEMORY_MB` (2048) and
-  `EMULATOR_MAX_CORES` (2) only ever lower what `config.ini` asks for. An AVD
-  left at the wizard default of 8192MB gets clamped; an AVD already sized at
-  1536MB is left alone. Set `EMULATOR_MEMORY_MB`/`EMULATOR_CORES` to force a value.
+- **RAM/cores follow the AVD, capped.** `EMULATOR_MAX_MEMORY_MB` (8192) and
+  `EMULATOR_MAX_CORES` (4) only ever lower what `config.ini` asks for. At two
+  concurrent devices the AVDs' own 8192MB/4-core request fits the host (~17GB of
+  62GB), so nothing is clamped; raise `MAX_EMULATORS` and these have to come
+  down with it. Set `EMULATOR_MEMORY_MB`/`EMULATOR_CORES` to force a value.
 - **Headless by default** (`EMULATOR_HEADLESS=true`). A window adds a whole
   compositing path on top of software rendering.
 - **`-gpu swiftshader_indirect` by default.** On a box with no usable GPU,
@@ -40,9 +42,21 @@ What the defaults do:
 - **Animations are switched off once the device boots**
   (`EMULATOR_TUNE_AFTER_BOOT`). With a software renderer every animation frame
   is rasterised on the host CPU.
-- **Admission control.** `MAX_EMULATORS` (4) plus a free-memory check refuse a
+- **Admission control.** `MAX_EMULATORS` (3) plus a free-memory check refuse a
   device the host cannot afford - overshooting into swap costs far more than the
-  extra device is worth.
+  extra device is worth. Two of those slots are the steady-state load; the third
+  is headroom for the overlap when a client registers a replacement before
+  releasing the device it has finished with.
+- **Devices are reclaimed on idleness, not age.** Every device-scoped route
+  bumps a last-used stamp, and `DEVICE_MAX_IDLE_MS` (15m) retires only devices
+  nothing has touched since. `DEVICE_MAX_AGE_MS` is an absolute cap from
+  registration and defaults to **0 (off)**: being busy does not make a device
+  younger, so an age rule tears down healthy devices mid-drive.
+- **An unnamed AVD is chosen server-side.** With `EMULATOR_READ_ONLY=false` one
+  AVD backs one emulator, so `AVD_AUTO_PICK` (on) hands a register that names no
+  `avd` a free one. An AVD the caller *does* name is never substituted - they
+  differ in which Google account is signed in - so that case returns 409 listing
+  which AVDs are free.
 - **`uiautomator dump` is no longer run before every adb call.** It is the single
   most expensive operation you can ask a device for; enable it per-host with
   `ADB_AUTO_DISMISS_DIALOGS=true` only if devices genuinely need it.
@@ -113,6 +127,11 @@ Below is a concise list of primary endpoints. All bodies are JSON unless noted.
 
 - **GET /devices** – list registered devices.
 
+- **DELETE /devices/:id** (also **POST /devices/:id/release**) – hand one device
+  back: cancels its scheduled tasks, shuts the emulator down, and frees both the
+  slot and its AVD. Call this when a task finishes; without it a slot is only
+  reclaimed by the idle sweep. `POST /cleanup` remains the all-at-once path.
+
 - **POST /devices/:id/proxy** – set proxy for a device.
   - Body: `{ "proxy": "http://host:port" }`
 
@@ -176,8 +195,12 @@ Below is a concise list of primary endpoints. All bodies are JSON unless noted.
 - `PORT`: server port (default `3000`).
 - `LOG_LEVEL`: pino log level (`info`, `debug`, etc.).
 - `GOOGLE_MAPS_API_KEY`: required for Directions-based GPS routes and Maps intents in `navigationService`.
-- `EMULATOR_HEADLESS`: when `true`, starts the Android emulator with `-no-window` (headless mode). Default: `false`.
-- `EMULATOR_GPU`: Android emulator GPU mode passed to `-gpu`. Default: `auto`. Common values: `host`, `auto`, `swiftshader`, `swangle`, `software`, `lavapipe`.
+- `EMULATOR_HEADLESS`: when `true`, starts the Android emulator with `-no-window` (headless mode). Default: `true`.
+- `EMULATOR_GPU`: Android emulator GPU mode passed to `-gpu`. Default: `swiftshader_indirect`. Common values: `host`, `auto`, `swiftshader_indirect`, `swangle`, `software`. On a host with no usable GPU, `auto` probes, fails, and falls back to software anyway - naming the software path skips the probe.
+- `MAX_EMULATORS`, `EMULATOR_MAX_MEMORY_MB`, `EMULATOR_MAX_CORES`: concurrency and per-device ceilings. See Resource tuning.
+- `DEVICE_MAX_IDLE_MS`: retire a device after this long with no request naming it. Default `900000` (15m); `0` disables.
+- `DEVICE_MAX_AGE_MS`: absolute cap on a device's life from registration, ignoring activity. Default `0` (off).
+- `AVD_AUTO_PICK`: choose a free AVD when a register names none. Default `true`.
 - `EMULATOR_DNS`: optional comma-separated DNS servers passed to emulator via `-dns-server`. Example: `8.8.8.8,1.1.1.1`.
 
 

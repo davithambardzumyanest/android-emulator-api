@@ -16,6 +16,11 @@ class DeviceManager {
       tasks: {},
       meta: meta || {},
       createdAt: new Date().toISOString(),
+      // Bumped by every request that names this device. Expiry runs off this
+      // rather than off createdAt: a device driving a long campaign must not be
+      // reclaimed out from under the client just for having been registered a
+      // while ago.
+      lastUsedAt: new Date().toISOString(),
     };
     this.devices.set(id, device);
     return device;
@@ -35,6 +40,16 @@ class DeviceManager {
     const updated = { ...d, ...patch };
     this.devices.set(id, updated);
     return updated;
+  }
+
+  // Mark the device as used right now. Mutated in place rather than going
+  // through update(): update() swaps in a fresh object, and simulateRoute()
+  // holds a reference to this one to park its interval handles on.
+  touch(id) {
+    const d = this.get(id);
+    if (!d) return null;
+    d.lastUsedAt = new Date().toISOString();
+    return d;
   }
 
   ensure(id) {

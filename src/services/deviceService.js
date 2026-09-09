@@ -122,6 +122,38 @@ async function listAvdsInUse() {
     });
 }
 
+// pm2 hands the API a thin environment, so the emulator binary is not reliably
+// on PATH. startEmulator has always patched this in; anything else that shells
+// out to the SDK needs the same treatment.
+function emulatorEnv() {
+    return {
+        ...process.env,
+        ANDROID_HOME: process.env.ANDROID_HOME || '/root/Android/Sdk',
+        ANDROID_SDK_ROOT: process.env.ANDROID_SDK_ROOT || '/root/Android/Sdk',
+        PATH: process.env.PATH
+            + ':/root/Android/Sdk/emulator'
+            + ':/root/Android/Sdk/platform-tools'
+            + ':/root/Android/Sdk/tools',
+    };
+}
+
+// Every AVD defined on this host. Resolves to [] if the emulator binary cannot
+// be reached, which callers must read as "unknown", never as "none exist".
+async function listDefinedAvds() {
+    return new Promise((resolve) => {
+        const proc = spawn('emulator', ['-list-avds'], {
+            stdio: ['ignore', 'pipe', 'ignore'],
+            env: emulatorEnv(),
+        });
+        let out = '';
+        proc.stdout.on('data', (d) => { out += d.toString(); });
+        proc.on('error', () => resolve([]));
+        proc.on('close', () => {
+            resolve(out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean));
+        });
+    });
+}
+
 // Read the sizing an AVD asks for, so we can clamp it rather than blindly
 // overriding it. Values look like "1536M", "8192M" or a bare number of MB.
 function readAvdSizing(avdName) {
@@ -211,23 +243,16 @@ const deviceService = {
             //   '--force'
             // ]);
 
-            // One AVD, one emulator. Without -read-only a second instance of a
-            // running AVD exits immediately, so catch it here with an error that
-            // says so rather than letting it fail silently.
-            if (avd && !cfg.readOnly) {
-                const inUse = await listAvdsInUse();
-                if (inUse && inUse.has(avd)) {
-                    const e = new Error(`AVD '${avd}' is already in use by a running emulator. An AVD cannot be shared unless EMULATOR_READ_ONLY=true; pick a different AVD.`);
-                    e.status = 409;
-                    throw e;
-                }
-            }
+            // One AVD, one emulator - and a register that names none used to
+            // run `emulator -avd  -port ...` with an empty name and still
+            // answer "ready".
+            const avdName = await this.resolveAvd(avd);
 
             // Start the emulator
-            const emulatorProcess = await this.startEmulator(avd, port, proxy);
-            await this.assertEmulatorStarted(emulatorProcess, avd);
+            const emulatorProcess = await this.startEmulator(avdName, port, proxy);
+            await this.assertEmulatorStarted(emulatorProcess, avdName);
 
-            meta.avd = avd || null;
+            meta.avd = avdName;
 
             // Update meta with emulator details
             meta.emulator = {
@@ -270,6 +295,72 @@ const deviceService = {
         }
 
         return device;
+    },
+
+    /**
+     * Decide which AVD this register should boot.
+     *
+     * With EMULATOR_READ_ONLY=false an AVD backs exactly one emulator: a second
+     * instance exits within a second with "Running multiple emulators with the
+     * same AVD". So a request naming one has to be checked against what is
+     * actually running, and a request naming none has to be handed a free one
+     * rather than an arbitrary one.
+     *
+     * An AVD the caller named is never swapped for a different one. The AVDs
+     * differ in which Google account is signed in, so substituting silently
+     * would run the campaign as the wrong user; a 409 that lists what is free
+     * is the honest answer and lets the caller retry against a real name.
+     */
+    async resolveAvd(requested) {
+        if (cfg.readOnly) {
+            // Every boot gets its own throwaway data overlay, so an AVD can
+            // back several emulators at once and there is nothing to contend.
+            if (requested) return requested;
+            if (cfg.avdAutoPick) {
+                const defined = await listDefinedAvds();
+                if (defined.length > 0) return defined[0];
+            }
+            const e = new Error("'avd' is required, and no AVD could be chosen automatically");
+            e.status = 400;
+            throw e;
+        }
+
+        const inUse = (await listAvdsInUse()) || new Set();
+
+        if (requested) {
+            if (!inUse.has(requested)) return requested;
+
+            const free = (await listDefinedAvds()).filter((n) => !inUse.has(n));
+            const e = new Error(
+                `AVD '${requested}' is already backing a running emulator, and an AVD cannot be shared unless EMULATOR_READ_ONLY=true. `
+                + (free.length > 0 ? `Free right now: ${free.join(', ')}.` : 'No AVD is free right now.')
+            );
+            e.status = 409;
+            throw e;
+        }
+
+        if (!cfg.avdAutoPick) {
+            const e = new Error("'avd' is required, or set AVD_AUTO_PICK=true to have the server choose a free one");
+            e.status = 400;
+            throw e;
+        }
+
+        const defined = await listDefinedAvds();
+        if (defined.length === 0) {
+            const e = new Error('No AVD is defined on this host, or the emulator binary could not be run to list them');
+            e.status = 500;
+            throw e;
+        }
+
+        const free = defined.filter((n) => !inUse.has(n));
+        if (free.length === 0) {
+            const e = new Error(`No free AVD: all ${defined.length} defined AVD(s) are already backing a running emulator.`);
+            e.status = 409;
+            throw e;
+        }
+
+        logger.info(`no AVD requested; picked '${free[0]}' (${free.length} free of ${defined.length})`);
+        return free[0];
     },
 
     /**
@@ -350,37 +441,85 @@ const deviceService = {
     },
 
     /**
-     * Retire devices older than cfg.deviceMaxAgeMs. Age is measured from
-     * registration, not last use: the point is to bound how long a device may
-     * hold a slot, and nothing in the API tracks activity per device.
+     * Mark a device as in use. Every request that names one calls this, and it
+     * is the whole reason the sweep below can be safe: a device being driven is
+     * never idle, so it is never a candidate for retirement.
+     *
+     * Unknown ids are ignored - the route handlers 404 on their own.
+     */
+    touch(id) {
+        return deviceManager.touch(id);
+    },
+
+    /**
+     * Hand one device back: cancel its tasks, shut the emulator down, and drop
+     * the registry entry so both the slot and the AVD are free again.
+     *
+     * This is the path that was missing. The only release in the whole API was
+     * POST /cleanup, which tears down every device at once, so a client that
+     * finished with one early had no way to give it up and the registry simply
+     * filled to maxDevices and stayed there.
+     */
+    async release(id) {
+        const d = this.getOrThrow(id);
+        const serial = d?.meta?.deviceId || null;
+        const avd = d?.meta?.avd || null;
+
+        // stopDevice() drives adb through executeAdb(), which looks the device
+        // up by id, so the registry entry has to outlive the stop.
+        const stopped = await this.stopDevice(d);
+        deviceManager.remove(d.id);
+
+        logger.info(`released ${serial || id}${avd ? ` (avd ${avd})` : ''}, ${stopped.tasksCleared} task(s) cancelled`);
+        return {...stopped, deviceId: id, serial, avd, released: true};
+    },
+
+    /**
+     * Retire devices nothing is using any more.
+     *
+     * Idleness is the test, not age. Every request naming a device bumps its
+     * lastUsedAt, so a device driving a campaign is never a candidate however
+     * long that campaign runs. Age-from-registration was the previous rule and
+     * it was wrong in exactly that way: it tore down healthy, actively driven
+     * devices on the hour, because nothing about being busy makes a device
+     * younger. cfg.deviceMaxAgeMs still works as an opt-in absolute backstop.
      */
     async expireOldDevices() {
+        const maxIdleMs = cfg.deviceMaxIdleMs;
         const maxAgeMs = cfg.deviceMaxAgeMs;
-        if (maxAgeMs <= 0) return [];
+        if (maxIdleMs <= 0 && maxAgeMs <= 0) return [];
 
         const now = Date.now();
-        const expired = [];
+        const retired = [];
 
         for (const d of deviceManager.list()) {
             if (d.platform !== 'android') continue;
 
             const created = Date.parse(d.createdAt);
-            if (!Number.isFinite(created) || now - created < maxAgeMs) continue;
+            const used = Date.parse(d.lastUsedAt || d.createdAt);
 
-            const label = `${d?.meta?.deviceId || d.id} (${Math.round((now - created) / 60000)}m old)`;
+            let reason = null;
+            if (maxIdleMs > 0 && Number.isFinite(used) && now - used >= maxIdleMs) {
+                reason = `idle ${Math.round((now - used) / 60000)}m`;
+            } else if (maxAgeMs > 0 && Number.isFinite(created) && now - created >= maxAgeMs) {
+                reason = `age ${Math.round((now - created) / 60000)}m`;
+            }
+            if (!reason) continue;
+
+            const label = `${d?.meta?.deviceId || d.id} (${reason})`;
             try {
                 await this.stopDevice(d);
             } catch (e) {
-                logger.warn(`expiring ${label}: stop failed: ${e.message}`);
+                logger.warn(`retiring ${label}: stop failed: ${e.message}`);
             }
             deviceManager.remove(d.id);
-            expired.push(label);
+            retired.push(label);
         }
 
-        if (expired.length > 0) {
-            logger.info(`expired ${expired.length} device(s) past ${Math.round(maxAgeMs / 60000)}m: ${expired.join(', ')}`);
+        if (retired.length > 0) {
+            logger.info(`retired ${retired.length} unused device(s): ${retired.join(', ')}`);
         }
-        return expired;
+        return retired;
     },
 
     /**
@@ -618,15 +757,7 @@ const deviceService = {
             stdio: ['ignore', logFd, logFd],
             detached: true,
             shell: false,
-            env: {
-                ...process.env,                         // keep existing env
-                ANDROID_HOME: process.env.ANDROID_HOME || '/root/Android/Sdk',
-                ANDROID_SDK_ROOT: process.env.ANDROID_SDK_ROOT || '/root/Android/Sdk',
-                PATH: process.env.PATH
-                    + ':/root/Android/Sdk/emulator'
-                    + ':/root/Android/Sdk/platform-tools'
-                    + ':/root/Android/Sdk/tools'
-            }
+            env: emulatorEnv(),
         });
 
         // The child dup'd the fd; ours would otherwise leak one per device.

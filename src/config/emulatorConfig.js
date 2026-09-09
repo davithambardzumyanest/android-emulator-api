@@ -46,14 +46,22 @@ const emulatorConfig = {
         return envInt('EMULATOR_CORES', 0);
     },
 
-    // Ceilings applied to whatever the AVD asks for. An AVD left at the wizard
-    // default (8192MB) would otherwise dwarf the host on its own.
+    // Ceilings applied to whatever the AVD asks for, so an AVD left at some
+    // wizard default cannot dwarf the host on its own.
+    //
+    // Sized for the deployed host - 8 vCPU / 62 GB running about two devices at
+    // a time. At that concurrency the AVDs' own request (8192MB / 4 cores) fits
+    // comfortably, so these ceilings are set not to clamp it: two devices is
+    // ~17GB of the 62GB, and the guest vCPUs are idle often enough that 2x4 on
+    // 8 host cores is not real oversubscription. The old 2048/2 pair was
+    // written for a 15GB box and six devices, and on this host it only starved
+    // the emulators.
     get maxMemoryMb() {
-        return envInt('EMULATOR_MAX_MEMORY_MB', 2048);
+        return envInt('EMULATOR_MAX_MEMORY_MB', 8192);
     },
 
     get maxCores() {
-        return envInt('EMULATOR_MAX_CORES', 2);
+        return envInt('EMULATOR_MAX_CORES', 4);
     },
 
     // Optional "WIDTHxHEIGHT" override. Fewer pixels is less software rasterising
@@ -83,18 +91,23 @@ const emulatorConfig = {
 
     // Hard ceiling on concurrent emulators. Overshooting pushes the host into
     // swap, which costs far more CPU than the extra device is worth.
+    //
+    // The client steadily runs two. The third slot is headroom for the overlap
+    // when it registers a replacement before releasing the device it is done
+    // with - without it that handoff is a 429.
     get maxDevices() {
-        return envInt('MAX_EMULATORS', 4);
+        return envInt('MAX_EMULATORS', 3);
     },
 
     // Reserve for the host itself before admitting another emulator.
     get reservedHostMb() {
-        return envInt('HOST_RESERVED_MB', 1536);
+        return envInt('HOST_RESERVED_MB', 4096);
     },
 
-    // Assumed footprint of one emulator when checking free memory.
+    // Assumed footprint of one emulator when checking free memory. Measured on
+    // the host: qemu RSS lands about 500MB above whatever -memory grants it.
     get assumedDeviceMb() {
-        return envInt('EMULATOR_ASSUMED_MB', 1800);
+        return envInt('EMULATOR_ASSUMED_MB', 8704);
     },
 
     // uiautomator dump is one of the most expensive things you can ask a device
@@ -111,15 +124,24 @@ const emulatorConfig = {
         return envInt('EMULATOR_STARTUP_GRACE_MS', 4000);
     },
 
-    // How long a device may live before it is retired. Nothing else releases
-    // one - there is no per-device stop endpoint, so a slot was only ever freed
-    // by an emulator dying - which means without this the registry fills to
-    // maxDevices and every later register fails with "Device limit reached".
-    // Set DEVICE_MAX_AGE_MS=0 to switch expiry off.
-    get deviceMaxAgeMs() {
-        const raw = String(process.env.DEVICE_MAX_AGE_MS ?? '').trim();
+    // How long a device may sit unused before it is retired. This is the
+    // reclaim mechanism: every request naming a device bumps its lastUsedAt, so
+    // a device driving a campaign is never a candidate no matter how long the
+    // campaign runs, while one the client walked away from frees its slot and
+    // its AVD within the window.
+    get deviceMaxIdleMs() {
+        const raw = String(process.env.DEVICE_MAX_IDLE_MS ?? '').trim();
         if (raw === '0') return 0;
-        return envInt('DEVICE_MAX_AGE_MS', 60 * 60 * 1000);
+        return envInt('DEVICE_MAX_IDLE_MS', 15 * 60 * 1000);
+    },
+
+    // Absolute cap on a device's life, counted from registration and ignoring
+    // activity. Off by default, and it should stay off: it was the 1h version
+    // of this that tore down devices in the middle of an active drive, since
+    // nothing about a busy device makes it younger. Set it only as a backstop
+    // against a client that keeps touching a device it can no longer use.
+    get deviceMaxAgeMs() {
+        return envInt('DEVICE_MAX_AGE_MS', 0);
     },
 
     // How often the expiry sweep runs.
@@ -132,6 +154,16 @@ const emulatorConfig = {
     // running it once, so the destructive sweep is opt-in rather than default.
     get cleanupRequiresForce() {
         return envBool('CLEANUP_REQUIRE_FORCE', true);
+    },
+
+    // With EMULATOR_READ_ONLY=false an AVD backs exactly one emulator, so a
+    // register that does not name one has to be given a free one or it races
+    // whatever is already running. Only ever fills in a missing name: an AVD the
+    // caller asked for by name is never substituted, because the AVDs differ in
+    // which Google account is signed in and swapping one silently would run the
+    // campaign as the wrong user.
+    get avdAutoPick() {
+        return envBool('AVD_AUTO_PICK', true);
     },
 
     get tuneAfterBoot() {
