@@ -5,6 +5,11 @@ const logger = require('../logger');
 const fs = require('fs');
 const path = require('path');
 const { handleSystemDialogs } = require('../utils/dialogHandler');
+const { startProxyRouter } = require('./proxyRouter');
+const { getDefaultBypassHosts } = require('../config/proxyBypassHosts');
+
+// device id -> proxy router (src/services/proxyRouter.js) its emulator uses.
+const proxyRouters = new Map();
 
 // One-time wipe flag to ensure next emulator start uses a clean data partition
 const wipeFlagPath = path.join(__dirname, '../../.state');
@@ -49,7 +54,15 @@ function consumeWipeOnceFlag() {
 
 const deviceService = {
     async register(payload) {
-        const {platform, proxy, meta = {}, avd} = payload || {};
+        const {
+            platform, proxy, meta = {}, avd,
+            // Hosts the emulator reaches without the proxy - see
+            // src/config/proxyBypassHosts.js. An array replaces the default
+            // list; false sends everything through the proxy.
+            proxyBypass = getDefaultBypassHosts()
+        } = payload || {};
+        let router = null;
+        let emulatorProcess = null;
 
         if (!platform || !['android', 'ios'].includes(platform)) {
             const e = new Error("'platform' must be 'android' or 'ios'");
@@ -70,8 +83,24 @@ const deviceService = {
             //   '--force'
             // ]);
 
+            // Route the emulator through a local proxy router that picks
+            // proxy or direct per hostname (src/services/proxyRouter.js).
+            // null for proxies it can't route for (non-HTTP) - the emulator
+            // then uses the proxy directly, as before.
+            if (proxy && process.env.EMULATOR_PROXY_ROUTER !== 'false') {
+                try {
+                    router = await startProxyRouter({
+                        label: `emulator-${port}`,
+                        upstream: proxy,
+                        bypassHosts: Array.isArray(proxyBypass) ? proxyBypass : []
+                    });
+                } catch (e) {
+                    logger.warn(`Proxy router failed to start, using the proxy directly: ${e.message}`);
+                }
+            }
+
             // Start the emulator
-            const emulatorProcess = await this.startEmulator(avd, port, proxy);
+            emulatorProcess = await this.startEmulator(avd, port, router ? router.url : proxy);
 
             // Update meta with emulator details
             meta.emulator = {
@@ -84,6 +113,14 @@ const deviceService = {
         }
 
         const device = deviceManager.register({platform, proxy, meta});
+
+        if (router) {
+            proxyRouters.set(device.id, router);
+            emulatorProcess.on('close', async () => {
+                proxyRouters.delete(device.id);
+                await router.close();
+            });
+        }
 
         // Best-effort: apply Android proxy if provided
         if (platform === 'android' && proxy) {
@@ -219,18 +256,22 @@ const deviceService = {
             logger.info(`[Emulator ${avdName}] using proxy ${norm} with DNS ${process.env.EMULATOR_DNS || '8.8.8.8,1.1.1.1'}`);
         }
 
+        // SDK location: ANDROID_SDK_ROOT from the environment when set
+        // (e.g. /usr/lib/android-sdk), otherwise the root install.
+        const sdkRoot = process.env.ANDROID_SDK_ROOT || '/root/Android/Sdk';
+
         // Launch emulator directly with logs to console for debugging
         const emulatorProcess = spawn('emulator', args, {
             stdio: 'inherit', // pipe to parent's stdio to see logs in console
             shell: false,
             env: {
                 ...process.env,                         // keep existing env
-                ANDROID_HOME: '/root/Android/Sdk',      // set correct SDK path
-                ANDROID_SDK_ROOT: '/root/Android/Sdk',
+                ANDROID_HOME: sdkRoot,                  // set correct SDK path
+                ANDROID_SDK_ROOT: sdkRoot,
                 PATH: process.env.PATH
-                    + ':/root/Android/Sdk/emulator'
-                    + ':/root/Android/Sdk/platform-tools'
-                    + ':/root/Android/Sdk/tools'
+                    + `:${sdkRoot}/emulator`
+                    + `:${sdkRoot}/platform-tools`
+                    + `:${sdkRoot}/tools`
             }
         });
 
@@ -272,6 +313,8 @@ const deviceService = {
             e.status = 404;
             throw e;
         }
+        // New connections from the emulator go to the new upstream proxy.
+        proxyRouters.get(id)?.setUpstream(proxy);
         // Apply proxy on device (async, best-effort)
         (async () => {
             try {
