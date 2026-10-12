@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { handleSystemDialogs } = require('../utils/dialogHandler');
 const { startProxyRouter } = require('./proxyRouter');
-const { getDefaultBypassHosts } = require('../config/proxyBypassHosts');
+const { DEFAULT_PROXY_BYPASS_HOSTS } = require('../config/proxyBypassHosts');
 
 // device id -> proxy router (src/services/proxyRouter.js) its emulator uses.
 const proxyRouters = new Map();
@@ -59,7 +59,7 @@ const deviceService = {
             // Hosts the emulator reaches without the proxy - see
             // src/config/proxyBypassHosts.js. An array replaces the default
             // list; false sends everything through the proxy.
-            proxyBypass = getDefaultBypassHosts()
+            proxyBypass = DEFAULT_PROXY_BYPASS_HOSTS
         } = payload || {};
         let router = null;
         let emulatorProcess = null;
@@ -87,7 +87,7 @@ const deviceService = {
             // proxy or direct per hostname (src/services/proxyRouter.js).
             // null for proxies it can't route for (non-HTTP) - the emulator
             // then uses the proxy directly, as before.
-            if (proxy && process.env.EMULATOR_PROXY_ROUTER !== 'false') {
+            if (proxy) {
                 try {
                     router = await startProxyRouter({
                         label: `emulator-${port}`,
