@@ -63,7 +63,11 @@ const DEFAULT_PROXY_BYPASS_HOSTS = [
     '*.ytimg.com',
     '*.googlevideo.com',
     'dl.google.com',
-    '*.gvt1.com'
+    '*.gvt1.com',
+    // Google Cloud Storage file downloads. A fresh (wiped) emulator pulls
+    // ~40 MB from it in the background right after boot (Play services /
+    // app component downloads) - the largest single cost per session.
+    'storage.googleapis.com'
 ];
 
 module.exports = { DEFAULT_PROXY_BYPASS_HOSTS };
