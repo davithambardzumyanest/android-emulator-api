@@ -5,10 +5,11 @@
 // browser-api's "/*.js"-style path rules cannot apply here.
 //
 // Every host here sees the server's real IP instead of the proxy IP, so the
-// list is limited to static, cookieless hosts. Google is excluded except for
-// its image-only hosts (Google could tie the server IP to the proxy IP the
-// device uses for Maps/Play), as are analytics/ad/tracking hosts, captcha/
-// anti-bot endpoints, and shared CDNs that also serve APIs (*.cloudfront.net,
+// list is limited to hosts that only serve files (images, fonts, JS/CSS,
+// media, downloads). API hosts stay on the proxy - www.google.com and
+// *.googleapis.com carry Maps tiles and search mixed with API calls on the
+// same connections - as do analytics/ad/tracking hosts, captcha/anti-bot
+// endpoints, and shared CDNs that also serve APIs (*.cloudfront.net,
 // *.akamaized.net).
 //
 // Override per device with the `proxyBypass` option of /devices/register
@@ -50,15 +51,19 @@ const DEFAULT_PROXY_BYPASS_HOSTS = [
     'images.unsplash.com',
     'images.pexels.com',
 
-    // Google image-only hosts: Maps place photos, Street View, satellite
-    // tiles, map icons. Map tiles and search results come from
-    // www.google.com / *.googleapis.com, mixed with API calls, so they stay
-    // on the proxy.
-    'lh*.googleusercontent.com',
+    // Google file hosts: static JS/CSS/fonts/images, Maps place photos,
+    // Street View, satellite tiles, Play/user images, YouTube thumbnails and
+    // video, app/component/model downloads.
+    '*.gstatic.com',
+    'fonts.googleapis.com',
+    '*.googleusercontent.com',
     '*.ggpht.com',
     'streetviewpixels-pa.googleapis.com',
     'khms*.google.com',
-    'maps.gstatic.com'
+    '*.ytimg.com',
+    '*.googlevideo.com',
+    'dl.google.com',
+    '*.gvt1.com'
 ];
 
 module.exports = { DEFAULT_PROXY_BYPASS_HOSTS };
