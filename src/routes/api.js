@@ -3,6 +3,7 @@ const router = express.Router();
 const deviceService = require('../services/deviceService');
 const emulatorService = require('../services/emulatorService');
 const actionService = require('../services/actionService');
+const { parseScreenshotOptions, encodeScreenshot, streamToBuffer } = require('../utils/screenshotFormat');
 
 router.get('/', (_req, res) => {
   res.json({ name: 'Unified Mobile Emulator API', status: 'ok' });
@@ -214,18 +215,28 @@ router.post('/devices/:id/gps/route', async (req, res) => {
 });
 
 // Screenshot
+// Body: { "type": "jpeg" | "webp" | "png" (default jpeg), "quality": 1-100 (default 70) }
 router.post('/devices/:id/screenshot', async (req, res) => {
   try {
-    const stream = await actionService.screenshotStream(req.params.id);
-    res.setHeader('Content-Type', 'image/png');
-    stream.pipe(res);
+    const options = parseScreenshotOptions(req.body || {});
+    const png = await streamToBuffer(await actionService.screenshotStream(req.params.id));
+    const image = await encodeScreenshot(png, options);
+    res.setHeader('Content-Type', `image/${image.type}`);
+    res.send(image.buffer);
   } catch (e) {
     res.status(e.status || 501).json({ error: e.message || 'screenshot not implemented' });
   }
 });
 
-// MJPEG-like stream using repeated PNG frames
+// MJPEG stream of repeated frames. Query: ?type=jpeg|webp|png&quality=1-100 (default jpeg, 70)
 router.get('/devices/:id/stream', async (req, res) => {
+  let options;
+  try {
+    options = parseScreenshotOptions(req.query);
+  } catch (e) {
+    return res.status(e.status || 400).json({ error: e.message });
+  }
+
   const boundary = 'frame';
   res.writeHead(200, {
     'Cache-Control': 'no-cache, no-store, must-revalidate',
@@ -240,24 +251,18 @@ router.get('/devices/:id/stream', async (req, res) => {
   req.on('close', () => { running = false; });
 
   async function captureOnce() {
-    // Get one PNG buffer by consuming the screenshot stream
-    const stream = await actionService.screenshotStream(req.params.id);
-    return new Promise((resolve, reject) => {
-      const chunks = [];
-      stream.on('data', (c) => chunks.push(c));
-      stream.on('end', () => resolve(Buffer.concat(chunks)));
-      stream.on('error', reject);
-    });
+    const png = await streamToBuffer(await actionService.screenshotStream(req.params.id));
+    return encodeScreenshot(png, options, { fast: true });
   }
 
   async function loop() {
     while (running) {
       try {
-        const png = await captureOnce();
+        const frame = await captureOnce();
         res.write(`--${boundary}\r\n`);
-        res.write('Content-Type: image/png\r\n');
-        res.write(`Content-Length: ${png.length}\r\n\r\n`);
-        res.write(png);
+        res.write(`Content-Type: image/${frame.type}\r\n`);
+        res.write(`Content-Length: ${frame.buffer.length}\r\n\r\n`);
+        res.write(frame.buffer);
         res.write('\r\n');
       } catch (_) {
         // If capture fails, wait a bit and retry

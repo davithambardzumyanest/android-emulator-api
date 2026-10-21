@@ -109,8 +109,13 @@ Below is a concise list of primary endpoints. All bodies are JSON unless noted.
 - **POST /devices/:id/gps/route** – simulate route along points.
   - Body: `{ "points": [{"lat":..,"lon":..}, ...], "intervalMs": 2000, "loop": false }`
 
-- **POST /devices/:id/screenshot** – returns a PNG stream once.
-- **GET /devices/:id/stream** – multipart stream of PNG frames.
+- **POST /devices/:id/screenshot** – returns one screenshot (JPEG by default).
+  - Body (optional): `{ "type": "jpeg", "quality": 70 }`
+  - `type`: `jpeg` (or `jpg`), `webp` or `png`. `quality`: 1-100, ignored for PNG. Invalid values return 400.
+  - `screencap` always captures PNG; the server re-encodes it, because JPEG is several times smaller. Use `"type": "png"` for lossless output.
+  - On very flat screens PNG can be smaller than JPEG; then the PNG is returned. Check the `Content-Type` response header for the actual format.
+- **GET /devices/:id/stream** – multipart stream of frames (JPEG by default).
+  - Query (optional): `?type=jpeg&quality=70&intervalMs=500`
 
 - **POST /cleanup** – stop all emulators and cleanup processes.
   - Behavior:
